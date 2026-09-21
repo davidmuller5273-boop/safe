@@ -6,14 +6,28 @@ import (
 
 	"github.com/davidmuller5273-boop/safe/internal/domain"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
 	RoleDeveloper  = "developer"
-	RoleAdmin      = "admin"
+	RoleAdmin      = "admin" // persisted key; display name = 超级管理员
 	RoleGroupAdmin = "group_admin"
 	RoleNone       = ""
 )
+
+func RoleLabel(role string) string {
+	switch role {
+	case RoleDeveloper:
+		return "开发者"
+	case RoleAdmin:
+		return "超级管理员"
+	case RoleGroupAdmin:
+		return "群管理员"
+	default:
+		return "普通用户"
+	}
+}
 
 type Store struct {
 	DB               *gorm.DB
@@ -61,7 +75,6 @@ func (s *Store) IsGroupAdmin(userID, chatID string) (bool, error) {
 	return count > 0, err
 }
 
-// RoleInChat returns the highest role the user has for the given chat.
 func (s *Store) RoleInChat(userID, chatID string) (string, error) {
 	userID = strings.TrimSpace(userID)
 	chatID = strings.TrimSpace(chatID)
@@ -84,7 +97,6 @@ func (s *Store) RoleInChat(userID, chatID string) (string, error) {
 	return RoleNone, nil
 }
 
-// CanManageRoles: only developers can add/remove admins; developer OR admin can grant/revoke group_admin.
 func (s *Store) CanManageAdmins(actorID string) bool {
 	return s.IsDeveloper(actorID)
 }
@@ -93,9 +105,13 @@ func (s *Store) CanManageGroupAdmins(actorID string) (bool, error) {
 	return s.IsAdmin(actorID)
 }
 
-// CanControlSensitive allows ads/broadcast/say for developer, admin, or group_admin (scoped).
 func (s *Store) CanControlSensitive(actorID, chatID string) (bool, error) {
 	return s.IsGroupAdmin(actorID, chatID)
+}
+
+// CanTogglePush: developer or 超级管理员 only.
+func (s *Store) CanTogglePush(actorID string) (bool, error) {
+	return s.IsAdmin(actorID)
 }
 
 func (s *Store) AddAdmin(userID, note string) error {
@@ -104,7 +120,7 @@ func (s *Store) AddAdmin(userID, note string) error {
 		return errors.New("user_id 不能为空")
 	}
 	if s.IsDeveloper(userID) {
-		return errors.New("该用户已是 developer，无需再设为 admin")
+		return errors.New("该用户已是开发者，无需再设为超级管理员")
 	}
 	row := domain.BotAdmin{UserID: userID, Note: note}
 	return s.DB.Where("user_id = ?", userID).Assign(domain.BotAdmin{Note: note}).FirstOrCreate(&row).Error
@@ -144,4 +160,53 @@ func (s *Store) ListGroupAdmins(chatID string) ([]domain.BotGroupAdmin, error) {
 	}
 	err := q.Find(&list).Error
 	return list, err
+}
+
+// EnsureGroup registers a group with push disabled by default.
+func (s *Store) EnsureGroup(chatID string) error {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return nil
+	}
+	row := domain.BotGroupSettings{ChatID: chatID, PushEnabled: false}
+	return s.DB.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "chat_id"}},
+		DoNothing: true,
+	}).Create(&row).Error
+}
+
+func (s *Store) SetPushEnabled(chatID string, enabled bool) error {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return errors.New("chat_id 不能为空")
+	}
+	if err := s.EnsureGroup(chatID); err != nil {
+		return err
+	}
+	return s.DB.Model(&domain.BotGroupSettings{}).Where("chat_id = ?", chatID).Update("push_enabled", enabled).Error
+}
+
+func (s *Store) IsPushEnabled(chatID string) (bool, error) {
+	chatID = strings.TrimSpace(chatID)
+	var row domain.BotGroupSettings
+	err := s.DB.Where("chat_id = ?", chatID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return row.PushEnabled, nil
+}
+
+func (s *Store) ListPushEnabledChatIDs() ([]string, error) {
+	var rows []domain.BotGroupSettings
+	if err := s.DB.Where("push_enabled = ?", true).Order("id").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.ChatID)
+	}
+	return out, nil
 }

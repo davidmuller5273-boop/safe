@@ -13,30 +13,51 @@ import (
 	"github.com/davidmuller5273-boop/safe/internal/systemconfig"
 )
 
-// commandHelp is intentionally short and must NOT include docs/使用教程 content.
-const commandHelp = `可用命令（权限控制）：
-/help — 显示本帮助
-/whoami — 查看你的权限
-/adstatus — 查看当前广告配置
-/resetads group — 删除本群广告覆盖（回落全局）
+// help text must NOT include docs/使用教程 content.
+func helpForRole(role string) string {
+	common := `/help — 显示你当前权限可见的菜单
+/whoami — 查看 user_id / chat_id / 角色
+/pushstatus — 查看本群推送是否开启`
+	groupAdmin := `
+广告（本群）：
+/setprefix [group] <文本>
+/setsuffix [group] <文本>
+/clearprefix [group]
+/clearsuffix [group]
+/adstatus
+/resetads group
+/say <文本>`
+	super := `
+推送（开发者 / 超级管理员）：
+/push on|off [chat_id] — 开启或关闭群推送（进群默认关闭）
+/broadcast <文本> — 向「已开启推送」的群发送
 
-广告（developer / admin / 本群 group_admin）：
-/setprefix [global|group] <文本> — 设置前广告
-/setsuffix [global|group] <文本> — 设置后广告
-/clearprefix [global|group] — 清空前广告
-/clearsuffix [global|group] — 清空后广告
-/say <文本> — 在本会话发送一条带广告的消息
-/broadcast <文本> — 向系统配置的全部群发送（仅 developer/admin）
+超级管理员管理（仅开发者）：
+/addsuperadmin <user_id>
+/removesuperadmin <user_id>
+/listsuperadmins
 
-角色：
-/addadmin <user_id> — 添加 admin（仅 developer）
-/removeadmin <user_id> — 移除 admin（仅 developer）
-/addgroupadmin <user_id> [chat_id] — 添加 group_admin（developer/admin）
-/removegroupadmin <user_id> [chat_id] — 移除 group_admin
-/listadmins — 列出 admin
-/listgroupadmins [chat_id] — 列出 group_admin
-
-说明：所有对外正文均通过广告组装后一次 sendMessage 发送；使用教程仅在仓库 docs/ 中，不会作为机器人消息下发。`
+群管理员（开发者 / 超级管理员）：
+/addgroupadmin <user_id> [chat_id]
+/removegroupadmin <user_id> [chat_id]
+/listgroupadmins [chat_id]`
+	adsGlobal := `
+全局广告（开发者 / 超级管理员）：
+/setprefix global <文本>
+/setsuffix global <文本>
+/clearprefix global
+/clearsuffix global`
+	switch role {
+	case botperm.RoleDeveloper:
+		return "【开发者菜单】\n" + common + groupAdmin + adsGlobal + super + "\n\n说明：机器人进群后默认不推送；对外正文一次 sendMessage 发送。"
+	case botperm.RoleAdmin:
+		return "【超级管理员菜单】\n" + common + groupAdmin + adsGlobal + super + "\n\n说明：进群默认不推送；不能添加/移除其他超级管理员。"
+	case botperm.RoleGroupAdmin:
+		return "【群管理员菜单】\n" + common + groupAdmin + "\n\n说明：仅可管理本群广告与 /say；不能开关推送。"
+	default:
+		return "【普通用户菜单】\n" + common + "\n\n无更多权限请联系开发者或超级管理员。"
+	}
+}
 
 func (w worker) runCommands(ctx context.Context) error {
 	var offset int64
@@ -82,7 +103,6 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 	if !strings.HasPrefix(text, "/") {
 		return nil
 	}
-	// Strip @BotName suffix on command token.
 	parts := strings.Fields(text)
 	cmd := strings.ToLower(parts[0])
 	if i := strings.Index(cmd, "@"); i > 0 {
@@ -98,18 +118,63 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 	}
 	chatID := msg.Chat.IDString()
 
+	// First time we see a chat/group: register with push OFF by default.
+	_ = w.perms.EnsureGroup(chatID)
+
+	role, err := w.perms.RoleInChat(userID, chatID)
+	if err != nil {
+		return err
+	}
+
 	switch cmd {
 	case "/help", "/start":
-		return w.reply(ctx, botConfig.Token, chatID, commandHelp)
+		return w.replyPlain(ctx, botConfig.Token, chatID, helpForRole(role))
 	case "/whoami":
-		role, err := w.perms.RoleInChat(userID, chatID)
+		pushOn, _ := w.perms.IsPushEnabled(chatID)
+		return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(
+			"user_id=%s\nchat_id=%s\n角色=%s (%s)\n本群推送=%v",
+			userID, chatID, botperm.RoleLabel(role), roleOrNone(role), pushOn,
+		))
+	case "/pushstatus":
+		pushOn, err := w.perms.IsPushEnabled(chatID)
 		if err != nil {
 			return err
 		}
-		if role == "" {
-			role = "none"
+		state := "关闭（默认）"
+		if pushOn {
+			state = "已开启"
 		}
-		return w.reply(ctx, botConfig.Token, chatID, fmt.Sprintf("user_id=%s\nchat_id=%s\nrole=%s", userID, chatID, role))
+		return w.replyPlain(ctx, botConfig.Token, chatID, "本群推送："+state)
+	case "/push":
+		ok, err := w.perms.CanTogglePush(userID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return w.replyPlain(ctx, botConfig.Token, chatID, "权限不足（需要开发者或超级管理员）")
+		}
+		fields := strings.Fields(args)
+		if len(fields) == 0 {
+			return w.replyPlain(ctx, botConfig.Token, chatID, "用法: /push on|off [chat_id]")
+		}
+		action := strings.ToLower(fields[0])
+		targetChat := chatID
+		if len(fields) > 1 {
+			targetChat = fields[1]
+		}
+		enabled := action == "on" || action == "enable" || action == "1" || action == "开启"
+		if action == "off" || action == "disable" || action == "0" || action == "关闭" {
+			enabled = false
+		} else if !enabled && action != "on" && action != "enable" && action != "1" && action != "开启" {
+			return w.replyPlain(ctx, botConfig.Token, chatID, "用法: /push on|off [chat_id]")
+		}
+		if err := w.perms.SetPushEnabled(targetChat, enabled); err != nil {
+			return err
+		}
+		if enabled {
+			return w.replyPlain(ctx, botConfig.Token, chatID, "已开启推送: "+targetChat)
+		}
+		return w.replyPlain(ctx, botConfig.Token, chatID, "已关闭推送: "+targetChat)
 	case "/adstatus":
 		ok, err := w.perms.CanControlSensitive(userID, chatID)
 		if err != nil {
@@ -145,7 +210,7 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 			scope = "group"
 		}
 		if scope != "group" {
-			return w.replyPlain(ctx, botConfig.Token, chatID, "用法: /resetads group （删除群覆盖以回落全局；全局请用 clearprefix/clearsuffix global）")
+			return w.replyPlain(ctx, botConfig.Token, chatID, "用法: /resetads group")
 		}
 		if err := ads.ClearGroup(w.db, chatID); err != nil {
 			return err
@@ -169,50 +234,54 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 			return err
 		}
 		if !ok {
-			return w.replyPlain(ctx, botConfig.Token, chatID, "权限不足（需要 developer 或 admin）")
+			return w.replyPlain(ctx, botConfig.Token, chatID, "权限不足（需要开发者或超级管理员）")
 		}
 		if strings.TrimSpace(args) == "" {
 			return w.replyPlain(ctx, botConfig.Token, chatID, "用法: /broadcast <文本>")
 		}
+		ids, err := w.perms.ListPushEnabledChatIDs()
+		if err != nil {
+			return err
+		}
 		n := 0
-		for _, id := range systemconfig.NormalizeChatIDs(botConfig.ChatIDs) {
+		for _, id := range ids {
 			if err := w.reply(ctx, botConfig.Token, id, args); err != nil {
 				return err
 			}
 			n++
 		}
-		return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf("已广播到 %d 个群", n))
-	case "/addadmin":
+		return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf("已广播到 %d 个已开启推送的群", n))
+	case "/addadmin", "/addsuperadmin":
 		if !w.perms.CanManageAdmins(userID) {
-			return w.replyPlain(ctx, botConfig.Token, chatID, "权限不足（仅 developer）")
+			return w.replyPlain(ctx, botConfig.Token, chatID, "权限不足（仅开发者）")
 		}
 		target := firstToken(args)
 		if target == "" {
-			return w.replyPlain(ctx, botConfig.Token, chatID, "用法: /addadmin <user_id>")
+			return w.replyPlain(ctx, botConfig.Token, chatID, "用法: /addsuperadmin <user_id>")
 		}
 		if err := w.perms.AddAdmin(target, ""); err != nil {
 			return w.replyPlain(ctx, botConfig.Token, chatID, err.Error())
 		}
-		return w.replyPlain(ctx, botConfig.Token, chatID, "已添加 admin: "+target)
-	case "/removeadmin":
+		return w.replyPlain(ctx, botConfig.Token, chatID, "已添加超级管理员: "+target)
+	case "/removeadmin", "/removesuperadmin":
 		if !w.perms.CanManageAdmins(userID) {
-			return w.replyPlain(ctx, botConfig.Token, chatID, "权限不足（仅 developer）")
+			return w.replyPlain(ctx, botConfig.Token, chatID, "权限不足（仅开发者）")
 		}
 		target := firstToken(args)
 		if target == "" {
-			return w.replyPlain(ctx, botConfig.Token, chatID, "用法: /removeadmin <user_id>")
+			return w.replyPlain(ctx, botConfig.Token, chatID, "用法: /removesuperadmin <user_id>")
 		}
 		if err := w.perms.RemoveAdmin(target); err != nil {
 			return err
 		}
-		return w.replyPlain(ctx, botConfig.Token, chatID, "已移除 admin: "+target)
+		return w.replyPlain(ctx, botConfig.Token, chatID, "已移除超级管理员: "+target)
 	case "/addgroupadmin":
 		ok, err := w.perms.CanManageGroupAdmins(userID)
 		if err != nil {
 			return err
 		}
 		if !ok {
-			return w.replyPlain(ctx, botConfig.Token, chatID, "权限不足（需要 developer 或 admin）")
+			return w.replyPlain(ctx, botConfig.Token, chatID, "权限不足（需要开发者或超级管理员）")
 		}
 		target, scopeChat := parseUserAndChat(args, chatID)
 		if target == "" {
@@ -221,14 +290,14 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 		if err := w.perms.AddGroupAdmin(target, scopeChat, ""); err != nil {
 			return w.replyPlain(ctx, botConfig.Token, chatID, err.Error())
 		}
-		return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf("已添加 group_admin user=%s chat=%s", target, scopeChat))
+		return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf("已添加群管理员 user=%s chat=%s", target, scopeChat))
 	case "/removegroupadmin":
 		ok, err := w.perms.CanManageGroupAdmins(userID)
 		if err != nil {
 			return err
 		}
 		if !ok {
-			return w.replyPlain(ctx, botConfig.Token, chatID, "权限不足（需要 developer 或 admin）")
+			return w.replyPlain(ctx, botConfig.Token, chatID, "权限不足（需要开发者或超级管理员）")
 		}
 		target, scopeChat := parseUserAndChat(args, chatID)
 		if target == "" {
@@ -237,8 +306,8 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 		if err := w.perms.RemoveGroupAdmin(target, scopeChat); err != nil {
 			return err
 		}
-		return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf("已移除 group_admin user=%s chat=%s", target, scopeChat))
-	case "/listadmins":
+		return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf("已移除群管理员 user=%s chat=%s", target, scopeChat))
+	case "/listadmins", "/listsuperadmins":
 		ok, err := w.perms.IsAdmin(userID)
 		if err != nil {
 			return err
@@ -251,13 +320,13 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 			return err
 		}
 		var b strings.Builder
-		b.WriteString("developers (config):\n")
+		b.WriteString("开发者 (配置):\n")
 		for id := range w.perms.DeveloperUserIDs {
 			b.WriteString("- " + id + "\n")
 		}
-		b.WriteString("admins (db):\n")
+		b.WriteString("超级管理员 (数据库):\n")
 		if len(list) == 0 {
-			b.WriteString("(empty)\n")
+			b.WriteString("(空)\n")
 		}
 		for _, a := range list {
 			b.WriteString("- " + a.UserID + "\n")
@@ -277,9 +346,9 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 			return err
 		}
 		var b strings.Builder
-		b.WriteString("group_admins:\n")
+		b.WriteString("群管理员:\n")
 		if len(list) == 0 {
-			b.WriteString("(empty)\n")
+			b.WriteString("(空)\n")
 		}
 		for _, a := range list {
 			fmt.Fprintf(&b, "- user=%s chat=%s\n", a.UserID, a.ChatID)
@@ -288,6 +357,13 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 	default:
 		return nil
 	}
+}
+
+func roleOrNone(role string) string {
+	if role == "" {
+		return "none"
+	}
+	return role
 }
 
 func (w worker) cmdSetAd(ctx context.Context, botConfig systemconfig.SafeW, userID, chatID, args string, isPrefix bool) error {
@@ -308,7 +384,7 @@ func (w worker) cmdSetAd(ctx context.Context, botConfig systemconfig.SafeW, user
 			return err
 		}
 		if role != botperm.RoleDeveloper && role != botperm.RoleAdmin {
-			return w.replyPlain(ctx, botConfig.Token, chatID, "设置全局广告需要 developer 或 admin")
+			return w.replyPlain(ctx, botConfig.Token, chatID, "设置全局广告需要开发者或超级管理员")
 		}
 		if isPrefix {
 			err = ads.SaveGlobal(w.db, &content, nil)
@@ -351,7 +427,7 @@ func (w worker) cmdClearAd(ctx context.Context, botConfig systemconfig.SafeW, us
 			return err
 		}
 		if role != botperm.RoleDeveloper && role != botperm.RoleAdmin {
-			return w.replyPlain(ctx, botConfig.Token, chatID, "清空全局广告需要 developer 或 admin")
+			return w.replyPlain(ctx, botConfig.Token, chatID, "清空全局广告需要开发者或超级管理员")
 		}
 		if isPrefix {
 			err = ads.SaveGlobal(w.db, &empty, nil)
@@ -375,7 +451,6 @@ func (w worker) cmdClearAd(ctx context.Context, botConfig systemconfig.SafeW, us
 	return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf("已清空 %s 广告（scope=%s）", which, scope))
 }
 
-// reply sends body wrapped with ads in a SINGLE sendMessage.
 func (w worker) reply(ctx context.Context, token, chatID, body string) error {
 	text, err := ads.Wrap(w.db, chatID, body)
 	if err != nil {
@@ -384,7 +459,6 @@ func (w worker) reply(ctx context.Context, token, chatID, body string) error {
 	return w.client.SendMessage(ctx, token, chatID, text)
 }
 
-// replyPlain sends without ads (for permission errors / short ACKs).
 func (w worker) replyPlain(ctx context.Context, token, chatID, body string) error {
 	return w.client.SendMessage(ctx, token, chatID, body)
 }

@@ -111,3 +111,14 @@ type BotGroupAd struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
+
+// BotGroupSettings tracks per-group bot behaviour.
+// PushEnabled defaults to false when the bot first sees a group.
+type BotGroupSettings struct {
+	ID          uint      `json:"id" gorm:"primaryKey"`
+	ChatID      string    `json:"chat_id" gorm:"uniqueIndex;size:64;not null"`
+	PushEnabled bool      `json:"push_enabled" gorm:"not null;default:false"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+

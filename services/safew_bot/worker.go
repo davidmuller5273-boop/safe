@@ -117,9 +117,12 @@ func (w worker) runQueue(ctx context.Context) error {
 }
 
 func (w worker) sendToChats(ctx context.Context, botConfig systemconfig.SafeW, message queue.LotteryDrawMessage, text string) error {
-	ids := systemconfig.NormalizeChatIDs(botConfig.ChatIDs)
+	ids, err := w.perms.ListPushEnabledChatIDs()
+	if err != nil {
+		return err
+	}
 	if len(ids) == 0 {
-		log.Printf("未配置群聊 ID，跳过开奖推送: issue=%s", message.IssueNumber)
+		log.Printf("没有已开启推送的群，跳过开奖推送: issue=%s", message.IssueNumber)
 		return nil
 	}
 	for _, chatID := range ids {
