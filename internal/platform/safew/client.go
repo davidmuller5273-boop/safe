@@ -58,6 +58,7 @@ type Update struct {
 	UpdateID     int               `json:"update_id"`
 	Message      *Message          `json:"message"`
 	MyChatMember *ChatMemberUpdated `json:"my_chat_member"`
+	ChatMember   *ChatMemberUpdated `json:"chat_member"`
 }
 
 type ChatMemberUpdated struct {
@@ -99,7 +100,7 @@ func (c *Client) GetUpdates(ctx context.Context, token string, offset int64, lim
 		"offset":          offset,
 		"limit":           limit,
 		"timeout":         timeout,
-		"allowed_updates": []string{"message", "my_chat_member"},
+		"allowed_updates": []string{"message", "my_chat_member", "chat_member"},
 	})
 	if err != nil {
 		return nil, err
@@ -162,6 +163,19 @@ func (c *Client) do(ctx context.Context, token, method string, body []byte, resu
 	return nil
 }
 
+
+
+func (c *Client) GetChatMemberCount(ctx context.Context, token, chatID string) (int, error) {
+	body, err := json.Marshal(map[string]any{"chat_id": chatID})
+	if err != nil {
+		return 0, err
+	}
+	var count int
+	if err := c.do(ctx, token, "getChatMemberCount", body, &count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
 
 func (c *Client) GetChat(ctx context.Context, token, chatID string) (Chat, error) {
 	body, err := json.Marshal(map[string]any{"chat_id": chatID})

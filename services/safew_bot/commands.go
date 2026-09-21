@@ -93,6 +93,10 @@ func (w worker) runCommands(ctx context.Context) error {
 				w.trackMyChatMember(ctx, botConfig.Token, update.MyChatMember)
 				continue
 			}
+			if update.ChatMember != nil {
+				w.trackChatMember(update.ChatMember)
+				continue
+			}
 			if update.Message == nil {
 				continue
 			}
@@ -540,6 +544,29 @@ func (w worker) trackMessageMember(msg *safew.Message) {
 	_ = w.perms.UpsertMember(chatID, msg.From.IDString(), msg.From.Username, msg.From.FirstName, false, false)
 }
 
+
+func (w worker) trackChatMember(ev *safew.ChatMemberUpdated) {
+	if ev == nil {
+		return
+	}
+	chatID := ev.Chat.IDString()
+	_ = w.perms.EnsureGroup(chatID)
+	_ = w.perms.UpsertGroupMeta(chatID, ev.Chat.Title, ev.Chat.Username, ev.Chat.Type)
+	user := ev.NewChatMember.User
+	status := strings.ToLower(strings.TrimSpace(ev.NewChatMember.Status))
+	switch status {
+	case "left", "kicked":
+		_ = w.perms.DeleteMember(chatID, user.IDString())
+	case "creator":
+		_ = w.perms.UpsertMember(chatID, user.IDString(), user.Username, user.FirstName, true, true)
+	case "administrator":
+		_ = w.perms.UpsertMember(chatID, user.IDString(), user.Username, user.FirstName, true, false)
+	default:
+		// member / restricted / etc.
+		_ = w.perms.UpsertMember(chatID, user.IDString(), user.Username, user.FirstName, false, false)
+	}
+}
+
 func (w worker) trackMyChatMember(ctx context.Context, token string, ev *safew.ChatMemberUpdated) {
 	if ev == nil {
 		return
@@ -622,15 +649,30 @@ func (w worker) cmdDevMembers(ctx context.Context, token, replyChat, args string
 		log.Printf("getChatAdministrators 失败 chat=%s: %v", targetChat, err)
 	}
 
+	liveCount := -1
+	if n, err := w.client.GetChatMemberCount(ctx, token, targetChat); err == nil {
+		liveCount = n
+	} else {
+		log.Printf("getChatMemberCount 失败 chat=%s: %v", targetChat, err)
+	}
+
 	rows, total, err := w.perms.ListMembers(targetChat, offset, pageSize)
 	if err != nil {
 		return err
 	}
 	if total == 0 {
-		return w.replyPlain(ctx, token, replyChat, "该群暂无成员缓存。可先在群里有人发言，或确认 bot 在群内后重试。")
+		msg := "该群暂无成员缓存。可先在群里有人发言/进退群，或确认 bot 在群内后重试。"
+		if liveCount >= 0 {
+			msg += fmt.Sprintf("\n群内实际人数: %d", liveCount)
+		}
+		return w.replyPlain(ctx, token, replyChat, msg)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "群 %s 成员 第%d页 / 共%d人\n", targetChat, page, total)
+	if liveCount >= 0 {
+		fmt.Fprintf(&b, "群 %s 成员 第%d页 / 缓存%d人 / 群内实际%d人\n", targetChat, page, total, liveCount)
+	} else {
+		fmt.Fprintf(&b, "群 %s 成员 第%d页 / 缓存%d人\n", targetChat, page, total)
+	}
 	for _, m := range rows {
 		name := strings.TrimSpace(m.Username)
 		if name != "" {

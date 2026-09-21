@@ -304,3 +304,13 @@ func (s *Store) ListMembers(chatID string, offset, limit int) ([]domain.BotGroup
 	err := s.DB.Where("chat_id = ?", chatID).Order("is_creator DESC, is_admin DESC, id").Offset(offset).Limit(limit).Find(&rows).Error
 	return rows, total, err
 }
+
+func (s *Store) DeleteMember(chatID, userID string) error {
+	chatID = strings.TrimSpace(chatID)
+	userID = strings.TrimSpace(userID)
+	if chatID == "" || userID == "" {
+		return nil
+	}
+	return s.DB.Where("chat_id = ? AND user_id = ?", chatID, userID).Delete(&domain.BotGroupMember{}).Error
+}
+
