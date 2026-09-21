@@ -210,3 +210,97 @@ func (s *Store) ListPushEnabledChatIDs() ([]string, error) {
 	}
 	return out, nil
 }
+
+
+func (s *Store) UpsertGroupMeta(chatID, title, username, chatType string) error {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return nil
+	}
+	if err := s.EnsureGroup(chatID); err != nil {
+		return err
+	}
+	updates := map[string]any{}
+	if title != "" {
+		updates["title"] = title
+	}
+	if username != "" {
+		updates["username"] = username
+	}
+	if chatType != "" {
+		updates["chat_type"] = chatType
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	return s.DB.Model(&domain.BotGroupSettings{}).Where("chat_id = ?", chatID).Updates(updates).Error
+}
+
+func (s *Store) ListGroups(offset, limit int) ([]domain.BotGroupSettings, int64, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	var total int64
+	if err := s.DB.Model(&domain.BotGroupSettings{}).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var rows []domain.BotGroupSettings
+	err := s.DB.Order("id").Offset(offset).Limit(limit).Find(&rows).Error
+	return rows, total, err
+}
+
+func (s *Store) UpsertMember(chatID, userID, username, firstName string, isAdmin, isCreator bool) error {
+	chatID = strings.TrimSpace(chatID)
+	userID = strings.TrimSpace(userID)
+	if chatID == "" || userID == "" {
+		return nil
+	}
+	row := domain.BotGroupMember{ChatID: chatID, UserID: userID}
+	assigns := domain.BotGroupMember{
+		Username:  username,
+		FirstName: firstName,
+		IsAdmin:   isAdmin,
+		IsCreator: isCreator,
+	}
+	return s.DB.Where("chat_id = ? AND user_id = ?", chatID, userID).Assign(assigns).FirstOrCreate(&row).Error
+}
+
+type MemberInfo struct {
+	UserID, Username, FirstName, Status string
+}
+
+func (s *Store) RefreshAdmins(chatID string, members []MemberInfo) error {
+	chatID = strings.TrimSpace(chatID)
+	if err := s.DB.Model(&domain.BotGroupMember{}).Where("chat_id = ?", chatID).
+		Updates(map[string]any{"is_admin": false, "is_creator": false}).Error; err != nil {
+		return err
+	}
+	for _, m := range members {
+		isCreator := m.Status == "creator"
+		isAdmin := isCreator || m.Status == "administrator"
+		if err := s.UpsertMember(chatID, m.UserID, m.Username, m.FirstName, isAdmin, isCreator); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ListMembers(chatID string, offset, limit int) ([]domain.BotGroupMember, int64, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	chatID = strings.TrimSpace(chatID)
+	var total int64
+	if err := s.DB.Model(&domain.BotGroupMember{}).Where("chat_id = ?", chatID).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var rows []domain.BotGroupMember
+	err := s.DB.Where("chat_id = ?", chatID).Order("is_creator DESC, is_admin DESC, id").Offset(offset).Limit(limit).Find(&rows).Error
+	return rows, total, err
+}

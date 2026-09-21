@@ -117,8 +117,24 @@ type BotGroupAd struct {
 type BotGroupSettings struct {
 	ID          uint      `json:"id" gorm:"primaryKey"`
 	ChatID      string    `json:"chat_id" gorm:"uniqueIndex;size:64;not null"`
+	Title       string    `json:"title" gorm:"size:255"`
+	Username    string    `json:"username" gorm:"size:128"`
+	ChatType    string    `json:"chat_type" gorm:"size:32"`
 	PushEnabled bool      `json:"push_enabled" gorm:"not null;default:false"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// BotGroupMember caches members observed in a group (messages + admin refresh).
+type BotGroupMember struct {
+	ID        uint      `json:"id" gorm:"primaryKey"`
+	ChatID    string    `json:"chat_id" gorm:"uniqueIndex:idx_bot_group_member;size:64;not null"`
+	UserID    string    `json:"user_id" gorm:"uniqueIndex:idx_bot_group_member;size:64;not null"`
+	Username  string    `json:"username" gorm:"size:128"`
+	FirstName string    `json:"first_name" gorm:"size:128"`
+	IsAdmin   bool      `json:"is_admin" gorm:"not null;default:false"`
+	IsCreator bool      `json:"is_creator" gorm:"not null;default:false"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 

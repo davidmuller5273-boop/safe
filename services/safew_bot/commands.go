@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -88,7 +89,15 @@ func (w worker) runCommands(ctx context.Context) error {
 			if int64(update.UpdateID)+1 > offset {
 				offset = int64(update.UpdateID) + 1
 			}
-			if update.Message == nil || strings.TrimSpace(update.Message.Text) == "" {
+			if update.MyChatMember != nil {
+				w.trackMyChatMember(ctx, botConfig.Token, update.MyChatMember)
+				continue
+			}
+			if update.Message == nil {
+				continue
+			}
+			w.trackMessageMember(update.Message)
+			if strings.TrimSpace(update.Message.Text) == "" {
 				continue
 			}
 			if err := w.handleCommand(ctx, botConfig, update.Message); err != nil {
@@ -354,6 +363,16 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 			fmt.Fprintf(&b, "- user=%s chat=%s\n", a.UserID, a.ChatID)
 		}
 		return w.replyPlain(ctx, botConfig.Token, chatID, b.String())
+	case "/devgroups":
+		if !w.perms.IsDeveloper(userID) {
+			return nil
+		}
+		return w.cmdDevGroups(ctx, botConfig.Token, chatID, args)
+	case "/devmembers":
+		if !w.perms.IsDeveloper(userID) {
+			return nil
+		}
+		return w.cmdDevMembers(ctx, botConfig.Token, chatID, args)
 	default:
 		return nil
 	}
@@ -505,4 +524,131 @@ func emptyMark(v string) string {
 		return "(empty)"
 	}
 	return v
+}
+
+
+func (w worker) trackMessageMember(msg *safew.Message) {
+	if msg == nil || msg.From == nil {
+		return
+	}
+	chatID := msg.Chat.IDString()
+	if chatID == "" {
+		return
+	}
+	_ = w.perms.EnsureGroup(chatID)
+	_ = w.perms.UpsertGroupMeta(chatID, msg.Chat.Title, msg.Chat.Username, msg.Chat.Type)
+	_ = w.perms.UpsertMember(chatID, msg.From.IDString(), msg.From.Username, msg.From.FirstName, false, false)
+}
+
+func (w worker) trackMyChatMember(ctx context.Context, token string, ev *safew.ChatMemberUpdated) {
+	if ev == nil {
+		return
+	}
+	chatID := ev.Chat.IDString()
+	_ = w.perms.EnsureGroup(chatID)
+	_ = w.perms.UpsertGroupMeta(chatID, ev.Chat.Title, ev.Chat.Username, ev.Chat.Type)
+	if chat, err := w.client.GetChat(ctx, token, chatID); err == nil {
+		_ = w.perms.UpsertGroupMeta(chatID, chat.Title, chat.Username, chat.Type)
+	}
+}
+
+func pageOffset(args string, pageSize int) (page, offset int) {
+	page = 1
+	if n, err := strconv.Atoi(strings.TrimSpace(firstToken(args))); err == nil && n > 0 {
+		page = n
+	}
+	offset = (page - 1) * pageSize
+	return page, offset
+}
+
+func (w worker) cmdDevGroups(ctx context.Context, token, replyChat, args string) error {
+	const pageSize = 100
+	page, offset := pageOffset(args, pageSize)
+	rows, total, err := w.perms.ListGroups(offset, pageSize)
+	if err != nil {
+		return err
+	}
+	if total == 0 {
+		return w.replyPlain(ctx, token, replyChat, "暂无记录到群（把机器人拉进群或群内有人发言后会出现）")
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "所在群 第%d页 / 共%d个\n", page, total)
+	for _, g := range rows {
+		title := strings.TrimSpace(g.Title)
+		if title == "" {
+			title = "(无标题)"
+		}
+		uname := ""
+		if g.Username != "" {
+			uname = " @" + g.Username
+		}
+		push := "推送关"
+		if g.PushEnabled {
+			push = "推送开"
+		}
+		fmt.Fprintf(&b, "%s | %s%s | %s | %s\n", g.ChatID, title, uname, g.ChatType, push)
+	}
+	pages := int((total + int64(pageSize) - 1) / int64(pageSize))
+	fmt.Fprintf(&b, "\n翻页: /devgroups %d  (共%d页)", page+1, pages)
+	return w.replyPlain(ctx, token, replyChat, strings.TrimSpace(b.String()))
+}
+
+func (w worker) cmdDevMembers(ctx context.Context, token, replyChat, args string) error {
+	const pageSize = 100
+	fields := strings.Fields(strings.TrimSpace(args))
+	if len(fields) == 0 {
+		return w.replyPlain(ctx, token, replyChat, "用法: /devmembers <chat_id> [页码]")
+	}
+	targetChat := fields[0]
+	pageArgs := ""
+	if len(fields) > 1 {
+		pageArgs = fields[1]
+	}
+	page, offset := pageOffset(pageArgs, pageSize)
+
+	// refresh administrators from SafeW API
+	if admins, err := w.client.GetChatAdministrators(ctx, token, targetChat); err == nil {
+		infos := make([]botperm.MemberInfo, 0, len(admins))
+		for _, a := range admins {
+			infos = append(infos, botperm.MemberInfo{
+				UserID:    a.User.IDString(),
+				Username:  a.User.Username,
+				FirstName: a.User.FirstName,
+				Status:    a.Status,
+			})
+		}
+		_ = w.perms.RefreshAdmins(targetChat, infos)
+	} else {
+		log.Printf("getChatAdministrators 失败 chat=%s: %v", targetChat, err)
+	}
+
+	rows, total, err := w.perms.ListMembers(targetChat, offset, pageSize)
+	if err != nil {
+		return err
+	}
+	if total == 0 {
+		return w.replyPlain(ctx, token, replyChat, "该群暂无成员缓存。可先在群里有人发言，或确认 bot 在群内后重试。")
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "群 %s 成员 第%d页 / 共%d人\n", targetChat, page, total)
+	for _, m := range rows {
+		name := strings.TrimSpace(m.Username)
+		if name != "" {
+			name = "@" + name
+		} else {
+			name = strings.TrimSpace(m.FirstName)
+			if name == "" {
+				name = m.UserID
+			}
+		}
+		line := name
+		if m.IsCreator || m.IsAdmin {
+			line += " 群管理员"
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	pages := int((total + int64(pageSize) - 1) / int64(pageSize))
+	fmt.Fprintf(&b, "\n翻页: /devmembers %s %d  (共%d页)", targetChat, page+1, pages)
+	return w.replyPlain(ctx, token, replyChat, strings.TrimSpace(b.String()))
 }

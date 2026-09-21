@@ -27,6 +27,7 @@ func Open(host string, port int, user, password, database string) (*gorm.DB, err
 		&domain.BotGroupAdmin{},
 		&domain.BotGroupAd{},
 		&domain.BotGroupSettings{},
+		&domain.BotGroupMember{},
 	); err != nil {
 		return nil, err
 	}

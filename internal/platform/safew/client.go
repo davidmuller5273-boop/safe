@@ -55,8 +55,22 @@ type Message struct {
 }
 
 type Update struct {
-	UpdateID int      `json:"update_id"`
-	Message  *Message `json:"message"`
+	UpdateID     int               `json:"update_id"`
+	Message      *Message          `json:"message"`
+	MyChatMember *ChatMemberUpdated `json:"my_chat_member"`
+}
+
+type ChatMemberUpdated struct {
+	Chat          Chat       `json:"chat"`
+	From          User       `json:"from"`
+	Date          int64      `json:"date"`
+	OldChatMember ChatMember `json:"old_chat_member"`
+	NewChatMember ChatMember `json:"new_chat_member"`
+}
+
+type ChatMember struct {
+	User   User   `json:"user"`
+	Status string `json:"status"`
 }
 
 type apiResponse[T any] struct {
@@ -85,7 +99,7 @@ func (c *Client) GetUpdates(ctx context.Context, token string, offset int64, lim
 		"offset":          offset,
 		"limit":           limit,
 		"timeout":         timeout,
-		"allowed_updates": []string{"message"},
+		"allowed_updates": []string{"message", "my_chat_member"},
 	})
 	if err != nil {
 		return nil, err
@@ -146,6 +160,31 @@ func (c *Client) do(ctx context.Context, token, method string, body []byte, resu
 		return fmt.Errorf("解析 SafeW result 失败: %w", err)
 	}
 	return nil
+}
+
+
+func (c *Client) GetChat(ctx context.Context, token, chatID string) (Chat, error) {
+	body, err := json.Marshal(map[string]any{"chat_id": chatID})
+	if err != nil {
+		return Chat{}, err
+	}
+	var chat Chat
+	if err := c.do(ctx, token, "getChat", body, &chat); err != nil {
+		return Chat{}, err
+	}
+	return chat, nil
+}
+
+func (c *Client) GetChatAdministrators(ctx context.Context, token, chatID string) ([]ChatMember, error) {
+	body, err := json.Marshal(map[string]any{"chat_id": chatID})
+	if err != nil {
+		return nil, err
+	}
+	var list []ChatMember
+	if err := c.do(ctx, token, "getChatAdministrators", body, &list); err != nil {
+		return nil, err
+	}
+	return list, nil
 }
 
 // FormatChatID normalizes numeric or string chat identifiers.
