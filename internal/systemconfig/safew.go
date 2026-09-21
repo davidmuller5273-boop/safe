@@ -24,8 +24,10 @@ func LoadSafeW(db *gorm.DB) (SafeW, error) {
 	if err != nil {
 		return SafeW{}, err
 	}
-	if result.Token == "" || len(result.ChatIDs) == 0 {
-		return result, errors.New("请先在系统配置中设置 SafeW 机器人 Token 和群聊 ID")
+	// Token alone is enough for command polling / private chats.
+	// Group chat IDs are optional; needed only when broadcasting lottery pushes.
+	if result.Token == "" {
+		return result, errors.New("请先在系统配置中设置 SafeW 机器人 Token")
 	}
 	return result, nil
 }
@@ -49,9 +51,6 @@ func ReadSafeW(db *gorm.DB) (SafeW, error) {
 
 func SaveSafeW(db *gorm.DB, token string, chatIDs []string) error {
 	chatIDs = NormalizeChatIDs(chatIDs)
-	if len(chatIDs) == 0 {
-		return errors.New("请至少填写一个 SafeW 群聊 ID")
-	}
 	chatIDsJSON, err := json.Marshal(chatIDs)
 	if err != nil {
 		return err
