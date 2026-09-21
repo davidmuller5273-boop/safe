@@ -1,0 +1,8 @@
+bin/
+*.exe
+.env
+config/app.yml
+chatadmin/node_modules/
+chatadmin/dist/
+.DS_Store
+*.log

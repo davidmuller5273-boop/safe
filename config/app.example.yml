@@ -1,0 +1,24 @@
+app:
+  admin_port: 8081
+  api_port: 8080
+  chat_port: 8082
+mysql:
+  host: 127.0.0.1
+  port: 3306
+  user: safe
+  password: "CHANGE_ME"
+  database: safe
+auth:
+  jwt_secret: "CHANGE_ME_JWT_SECRET"
+  expire_hours: 24
+lottery:
+  bsc_rpc_url: https://bsc-dataseed.bnbchain.org
+redis:
+  addr: 127.0.0.1:6379
+  password: ""
+  db: 0
+safew:
+  api_base_url: https://api.safew.bot
+bot:
+  # Comma-separated SafeW user IDs with developer (full) permissions
+  developer_user_ids: ""
