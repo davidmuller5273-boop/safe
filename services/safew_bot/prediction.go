@@ -204,7 +204,7 @@ func (w worker) renderPredictionHistory(lotteryTypeID uint, lotteryName string, 
 	stats30 := calculateStats(predictions, 30)
 	stats180 := calculateStats(predictions, 180)
 	return fmt.Sprintf(
-		"<b>%s %d码热号预测</b>\n<pre>%s</pre>\n\n--------------------\n<b>📊 周期胜率概览</b>\n30期：%.1f%%｜180期：%.1f%%\n近三小时最大连错：%d❌期\n近三小时最大连中：%d✅期",
+		"<b>%s %d码热号预测</b>\n<pre>%s</pre>\n\n--------------------\n<b>📊 周期胜率概览</b>\n30期：%.1f%%｜180期：%.1f%%\n近三小时最大连错：%d期❌\n近三小时最大连中：%d期✅",
 		html.EscapeString(lotteryName),
 		size,
 		html.EscapeString(table),
