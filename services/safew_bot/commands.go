@@ -424,6 +424,16 @@ func (w worker) cmdSetCodeMode(ctx context.Context, botConfig systemconfig.SafeW
 		return err
 	}
 	if enabled {
+		okEffective := botperm.Effective6Code(settings)
+		if size == 7 {
+			okEffective = botperm.Effective7Code(settings)
+		}
+		if !okEffective {
+			return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(
+				"设置失败：开启 %d码 未生效（请检查数据库列 enable_%d_code）\n%s",
+				size, size, botperm.FormatGroupCodeState(settings),
+			))
+		}
 		other := 7
 		if size == 7 {
 			other = 6

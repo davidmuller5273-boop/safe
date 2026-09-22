@@ -14,7 +14,7 @@ func TestEffectiveCodeModes(t *testing.T) {
 		want6      bool
 		want7      bool
 	}{
-		{"legacy push only", domain.BotGroupSettings{PushEnabled: true}, false, true},
+		{"legacy push only", domain.BotGroupSettings{PushEnabled: true}, false, false},
 		{"6 only", domain.BotGroupSettings{PushEnabled: true, Enable6Code: true}, true, false},
 		{"7 only", domain.BotGroupSettings{PushEnabled: true, Enable7Code: true}, false, true},
 		{"both", domain.BotGroupSettings{PushEnabled: true, Enable6Code: true, Enable7Code: true}, true, true},

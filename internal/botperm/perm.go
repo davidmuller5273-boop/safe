@@ -234,6 +234,7 @@ func (s *Store) ListPushTargets() ([]domain.BotGroupSettings, error) {
 // SetCodeMode enables/disables 6-code or 7-code predictions for a group.
 // Enabling one mode turns on push and turns the other mode off so a single
 // /开启6码 or /开启7码 is enough.
+// Uses raw SQL Exec so bool/map Updates quirks cannot silently skip writes.
 func (s *Store) SetCodeMode(chatID string, size int, enabled bool) error {
 	chatID = strings.TrimSpace(chatID)
 	if chatID == "" {
@@ -245,26 +246,46 @@ func (s *Store) SetCodeMode(chatID string, size int, enabled bool) error {
 	if err := s.EnsureGroup(chatID); err != nil {
 		return err
 	}
-	updates := map[string]any{}
-	if size == 6 {
-		updates["enable_6_code"] = enabled
-		if enabled {
-			updates["enable_7_code"] = false
-			updates["push_enabled"] = true
+	var sql string
+	switch {
+	case size == 6 && enabled:
+		sql = "UPDATE bot_group_settings SET enable_6_code=1, enable_7_code=0, push_enabled=1 WHERE chat_id=?"
+	case size == 7 && enabled:
+		sql = "UPDATE bot_group_settings SET enable_7_code=1, enable_6_code=0, push_enabled=1 WHERE chat_id=?"
+	case size == 6 && !enabled:
+		sql = "UPDATE bot_group_settings SET enable_6_code=0 WHERE chat_id=?"
+	default: // size == 7 && !enabled
+		sql = "UPDATE bot_group_settings SET enable_7_code=0 WHERE chat_id=?"
+	}
+	res := s.DB.Exec(sql, chatID)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		// MySQL reports 0 when values are unchanged; verify intended state.
+		row, err := s.GetGroupSettings(chatID)
+		if err != nil {
+			return err
 		}
-	} else {
-		updates["enable_7_code"] = enabled
-		if enabled {
-			updates["enable_6_code"] = false
-			updates["push_enabled"] = true
+		ok := false
+		switch {
+		case size == 6 && enabled:
+			ok = row.Enable6Code && !row.Enable7Code && row.PushEnabled
+		case size == 7 && enabled:
+			ok = row.Enable7Code && !row.Enable6Code && row.PushEnabled
+		case size == 6 && !enabled:
+			ok = !row.Enable6Code
+		case size == 7 && !enabled:
+			ok = !row.Enable7Code
+		}
+		if !ok {
+			return fmt.Errorf("SetCodeMode: 未更新任何行 (chat_id=%s size=%d enabled=%v)", chatID, size, enabled)
 		}
 	}
-	return s.DB.Model(&domain.BotGroupSettings{}).Where("chat_id = ?", chatID).Updates(updates).Error
+	return nil
 }
 
 // IsCodeEnabled reports whether the given code size is enabled for the chat.
-// Size 7 falls back to true when push is on and neither mode has been set
-// (backward compatible with groups that only toggled /push).
 func (s *Store) IsCodeEnabled(chatID string, size int) (bool, error) {
 	chatID = strings.TrimSpace(chatID)
 	if size != 6 && size != 7 {
@@ -279,15 +300,14 @@ func (s *Store) IsCodeEnabled(chatID string, size int) (bool, error) {
 		return false, err
 	}
 	if size == 6 {
-		return row.Enable6Code, nil
+		return Effective6Code(row), nil
 	}
 	return Effective7Code(row), nil
 }
 
-// Effective7Code is true when Enable7Code is set, or when push is on and
-// neither 6 nor 7 mode has been configured (legacy groups).
+// Effective7Code is true only when Enable7Code is set (no legacy push-only fallback).
 func Effective7Code(row domain.BotGroupSettings) bool {
-	return row.Enable7Code || (row.PushEnabled && !row.Enable6Code && !row.Enable7Code)
+	return row.Enable7Code
 }
 
 // Effective6Code is true when Enable6Code is set.
