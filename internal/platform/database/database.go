@@ -73,6 +73,7 @@ func ensureBotGroupSettingsSchema(db *gorm.DB) error {
 
 // mergeMistakenCodeColumns copies values from GORM-default enable6_code /
 // enable7_code into enable_6_code / enable_7_code, then drops the mistaken columns.
+// Missing wrong-named columns are skipped; unknown-column errors never abort startup.
 func mergeMistakenCodeColumns(db *gorm.DB) error {
 	pairs := []struct{ wrong, right string }{
 		{"enable6_code", "enable_6_code"},
@@ -96,9 +97,15 @@ func mergeMistakenCodeColumns(db *gorm.DB) error {
 				p.right, p.wrong, p.right, p.wrong,
 			)
 			if err := db.Exec(q).Error; err != nil {
+				if isUnknownColumn(err) {
+					continue
+				}
 				return err
 			}
 			if err := db.Exec(fmt.Sprintf("ALTER TABLE `bot_group_settings` DROP COLUMN `%s`", p.wrong)).Error; err != nil {
+				if isUnknownColumn(err) || isCantDropColumn(err) {
+					continue
+				}
 				return err
 			}
 			continue
@@ -109,6 +116,9 @@ func mergeMistakenCodeColumns(db *gorm.DB) error {
 			p.wrong, p.right,
 		)
 		if err := db.Exec(q).Error; err != nil {
+			if isUnknownColumn(err) {
+				continue
+			}
 			return err
 		}
 	}
@@ -116,12 +126,41 @@ func mergeMistakenCodeColumns(db *gorm.DB) error {
 }
 
 func mysqlColumnExists(db *gorm.DB, table, column string) (bool, error) {
-	var n int64
-	err := db.Raw(`
-SELECT COUNT(*) FROM information_schema.COLUMNS
-WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
-		table, column).Scan(&n).Error
-	return n > 0, err
+	// SHOW COLUMNS is scoped to the current database connection; more reliable
+	// than information_schema + DATABASE() under some MySQL privilege setups.
+	type colRow struct {
+		Field string `gorm:"column:Field"`
+	}
+	var rows []colRow
+	err := db.Raw(fmt.Sprintf("SHOW COLUMNS FROM `%s` LIKE ?", table), column).Scan(&rows).Error
+	if err != nil {
+		if isUnknownColumn(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	for _, r := range rows {
+		if strings.EqualFold(r.Field, column) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func isUnknownColumn(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "1054") || strings.Contains(msg, "Unknown column")
+}
+
+func isCantDropColumn(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "1091") || strings.Contains(msg, "Can't DROP")
 }
 
 func isDuplicateColumn(err error) bool {
