@@ -3,6 +3,7 @@ package database
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"github.com/davidmuller5273-boop/safe/internal/domain"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/driver/mysql"
@@ -31,7 +32,46 @@ func Open(host string, port int, user, password, database string) (*gorm.DB, err
 	); err != nil {
 		return nil, err
 	}
+	if err = ensureHotNumberPredictionSchema(db); err != nil {
+		return nil, err
+	}
 	return db, seed(db)
+}
+
+// ensureHotNumberPredictionSchema adds code_size defaults and a composite unique
+// index. Index creation is done manually because GORM AutoMigrate can emit
+// Error 1061 (Duplicate key name) for multi-column uniqueIndex tags.
+func ensureHotNumberPredictionSchema(db *gorm.DB) error {
+	// Backfill code_size for rows created before the column existed.
+	if err := db.Exec("UPDATE hot_number_predictions SET code_size = 7 WHERE code_size = 0 OR code_size IS NULL").Error; err != nil {
+		return err
+	}
+	// Drop legacy unique index (lottery_type_id, issue_number) if present.
+	if db.Migrator().HasIndex(&domain.HotNumberPrediction{}, "idx_hot_predictions_lottery_issue") {
+		if err := db.Migrator().DropIndex(&domain.HotNumberPrediction{}, "idx_hot_predictions_lottery_issue"); err != nil {
+			return err
+		}
+	}
+	const name = "idx_hot_predictions_lottery_issue_size"
+	if db.Migrator().HasIndex(&domain.HotNumberPrediction{}, name) {
+		return nil
+	}
+	if err := db.Exec("CREATE UNIQUE INDEX `" + name + "` ON `hot_number_predictions` (`lottery_type_id`,`issue_number`,`code_size`)").Error; err != nil {
+		// Another process may have created it; ignore duplicate name.
+		if isDuplicateKeyName(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func isDuplicateKeyName(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "1061") || strings.Contains(msg, "Duplicate key name")
 }
 func seed(db *gorm.DB) error {
 	permissions := []domain.Permission{{Code: "dashboard:view", Name: "查看首页"}, {Code: "admin:manage", Name: "管理员管理"}, {Code: "role:manage", Name: "角色管理"}, {Code: "permission:view", Name: "查看权限"}, {Code: "system:config", Name: "系统配置"}, {Code: "lottery:manage", Name: "彩票管理"}}

@@ -70,9 +70,9 @@ type DrawRecord struct {
 // CodeSize is 6 or 7; existing rows default to 7.
 type HotNumberPrediction struct {
 	ID              uint       `json:"id" gorm:"primaryKey"`
-	LotteryTypeID   uint       `json:"lottery_type_id" gorm:"not null;uniqueIndex:idx_hot_predictions_lottery_issue_size;index"`
-	IssueNumber     string     `json:"issue_number" gorm:"size:64;not null;uniqueIndex:idx_hot_predictions_lottery_issue_size"`
-	CodeSize        int        `json:"code_size" gorm:"not null;default:7;uniqueIndex:idx_hot_predictions_lottery_issue_size"`
+	LotteryTypeID   uint       `json:"lottery_type_id" gorm:"not null;index"`
+	IssueNumber     string     `json:"issue_number" gorm:"size:64;not null;index"`
+	CodeSize        int        `json:"code_size" gorm:"not null;default:7;index"`
 	HotNumbers      string     `json:"hot_numbers" gorm:"type:text;not null"`
 	Prediction      string     `json:"prediction" gorm:"size:16;not null"`
 	ActualHotNumber string     `json:"actual_hot_number" gorm:"size:2"`
