@@ -82,7 +82,6 @@ type HotNumberPrediction struct {
 	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
-
 // BotAdmin grants global bot-admin privileges (not developer).
 // Only developers can add/remove admins. Persisted in MySQL.
 type BotAdmin struct {
@@ -123,8 +122,8 @@ type BotGroupSettings struct {
 	Username    string    `json:"username" gorm:"size:128"`
 	ChatType    string    `json:"chat_type" gorm:"size:32"`
 	PushEnabled bool      `json:"push_enabled" gorm:"not null;default:false"`
-	Enable6Code bool      `json:"enable_6_code" gorm:"not null;default:false"`
-	Enable7Code bool      `json:"enable_7_code" gorm:"not null;default:false"`
+	Enable6Code bool      `json:"enable_6_code" gorm:"column:enable_6_code;not null;default:false"`
+	Enable7Code bool      `json:"enable_7_code" gorm:"column:enable_7_code;not null;default:false"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
@@ -141,4 +140,3 @@ type BotGroupMember struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
-

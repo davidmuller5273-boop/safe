@@ -3,11 +3,11 @@ package database
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"github.com/davidmuller5273-boop/safe/internal/domain"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	"strings"
 )
 
 func Open(host string, port int, user, password, database string) (*gorm.DB, error) {
@@ -42,7 +42,9 @@ func Open(host string, port int, user, password, database string) (*gorm.DB, err
 }
 
 // ensureBotGroupSettingsSchema adds columns AutoMigrate sometimes skips on
-// existing MySQL tables (e.g. enable_6_code / enable_7_code).
+// existing MySQL tables (e.g. enable_6_code / enable_7_code), and removes
+// mistaken enable6_code / enable7_code columns that GORM's default naming
+// (Enable6Code → enable6_code) may have created beside the SQL-migration names.
 func ensureBotGroupSettingsSchema(db *gorm.DB) error {
 	type col struct {
 		field string
@@ -66,7 +68,60 @@ func ensureBotGroupSettingsSchema(db *gorm.DB) error {
 			return err
 		}
 	}
+	return mergeMistakenCodeColumns(db)
+}
+
+// mergeMistakenCodeColumns copies values from GORM-default enable6_code /
+// enable7_code into enable_6_code / enable_7_code, then drops the mistaken columns.
+func mergeMistakenCodeColumns(db *gorm.DB) error {
+	pairs := []struct{ wrong, right string }{
+		{"enable6_code", "enable_6_code"},
+		{"enable7_code", "enable_7_code"},
+	}
+	for _, p := range pairs {
+		hasWrong, err := mysqlColumnExists(db, "bot_group_settings", p.wrong)
+		if err != nil {
+			return err
+		}
+		if !hasWrong {
+			continue
+		}
+		hasRight, err := mysqlColumnExists(db, "bot_group_settings", p.right)
+		if err != nil {
+			return err
+		}
+		if hasRight {
+			q := fmt.Sprintf(
+				"UPDATE `bot_group_settings` SET `%s` = `%s` WHERE `%s` = 0 AND `%s` <> 0",
+				p.right, p.wrong, p.right, p.wrong,
+			)
+			if err := db.Exec(q).Error; err != nil {
+				return err
+			}
+			if err := db.Exec(fmt.Sprintf("ALTER TABLE `bot_group_settings` DROP COLUMN `%s`", p.wrong)).Error; err != nil {
+				return err
+			}
+			continue
+		}
+		// Only the mistaken name exists: rename it to the canonical column.
+		q := fmt.Sprintf(
+			"ALTER TABLE `bot_group_settings` CHANGE COLUMN `%s` `%s` tinyint(1) NOT NULL DEFAULT 0",
+			p.wrong, p.right,
+		)
+		if err := db.Exec(q).Error; err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func mysqlColumnExists(db *gorm.DB, table, column string) (bool, error) {
+	var n int64
+	err := db.Raw(`
+SELECT COUNT(*) FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+		table, column).Scan(&n).Error
+	return n > 0, err
 }
 
 func isDuplicateColumn(err error) bool {

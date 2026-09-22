@@ -1,13 +1,13 @@
 package botperm
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/davidmuller5273-boop/safe/internal/domain"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 const (
@@ -176,16 +176,18 @@ func (s *Store) ListGroupAdmins(chatID string) ([]domain.BotGroupAdmin, error) {
 }
 
 // EnsureGroup registers a group with push disabled by default.
+// Uses MySQL upsert (no-op on conflict) instead of GORM clause.OnConflict
+// DoNothing, which is unreliable on some MySQL/GORM combinations.
 func (s *Store) EnsureGroup(chatID string) error {
 	chatID = strings.TrimSpace(chatID)
 	if chatID == "" {
 		return nil
 	}
-	row := domain.BotGroupSettings{ChatID: chatID, PushEnabled: false}
-	return s.DB.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "chat_id"}},
-		DoNothing: true,
-	}).Create(&row).Error
+	return s.DB.Exec(`
+INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code, created_at, updated_at)
+VALUES (?, 0, 0, 0, NOW(3), NOW(3))
+ON DUPLICATE KEY UPDATE chat_id = chat_id
+`, chatID).Error
 }
 
 func (s *Store) SetPushEnabled(chatID string, enabled bool) error {
@@ -200,12 +202,7 @@ func (s *Store) SetPushEnabled(chatID string, enabled bool) error {
 }
 
 func (s *Store) IsPushEnabled(chatID string) (bool, error) {
-	chatID = strings.TrimSpace(chatID)
-	var row domain.BotGroupSettings
-	err := s.DB.Where("chat_id = ?", chatID).First(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, nil
-	}
+	row, err := s.GetGroupSettings(chatID)
 	if err != nil {
 		return false, err
 	}
@@ -225,16 +222,48 @@ func (s *Store) ListPushEnabledChatIDs() ([]string, error) {
 }
 
 // ListPushTargets returns groups with PushEnabled=true (includes code-mode fields).
+// Loads flag columns via int scan for the same reason as GetGroupSettings.
 func (s *Store) ListPushTargets() ([]domain.BotGroupSettings, error) {
-	var rows []domain.BotGroupSettings
-	err := s.DB.Where("push_enabled = ?", true).Order("id").Find(&rows).Error
-	return rows, err
+	type rawRow struct {
+		ID          uint           `gorm:"column:id"`
+		ChatID      string         `gorm:"column:chat_id"`
+		Title       sql.NullString `gorm:"column:title"`
+		Username    sql.NullString `gorm:"column:username"`
+		ChatType    sql.NullString `gorm:"column:chat_type"`
+		PushEnabled int            `gorm:"column:push_enabled"`
+		Enable6Code int            `gorm:"column:enable_6_code"`
+		Enable7Code int            `gorm:"column:enable_7_code"`
+	}
+	var raws []rawRow
+	err := s.DB.Raw(`
+SELECT id, chat_id, title, username, chat_type,
+       push_enabled, enable_6_code, enable_7_code
+FROM bot_group_settings WHERE push_enabled = 1 ORDER BY id`).Scan(&raws).Error
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.BotGroupSettings, 0, len(raws))
+	for _, r := range raws {
+		out = append(out, domain.BotGroupSettings{
+			ID:          r.ID,
+			ChatID:      r.ChatID,
+			Title:       r.Title.String,
+			Username:    r.Username.String,
+			ChatType:    r.ChatType.String,
+			PushEnabled: r.PushEnabled != 0,
+			Enable6Code: r.Enable6Code != 0,
+			Enable7Code: r.Enable7Code != 0,
+		})
+	}
+	return out, nil
 }
 
 // SetCodeMode enables/disables 6-code or 7-code predictions for a group.
 // Enabling one mode turns on push and turns the other mode off so a single
 // /开启6码 or /开启7码 is enough.
-// Uses raw SQL Exec so bool/map Updates quirks cannot silently skip writes.
+// Uses MySQL INSERT ... ON DUPLICATE KEY UPDATE so a missing row is created
+// (does not rely on EnsureGroup / GORM OnConflict alone). Verifies with a
+// raw int scan so GORM bool mapping cannot mask a failed write.
 func (s *Store) SetCodeMode(chatID string, size int, enabled bool) error {
 	chatID = strings.TrimSpace(chatID)
 	if chatID == "" {
@@ -243,59 +272,97 @@ func (s *Store) SetCodeMode(chatID string, size int, enabled bool) error {
 	if size != 6 && size != 7 {
 		return errors.New("size 必须为 6 或 7")
 	}
-	if err := s.EnsureGroup(chatID); err != nil {
+	sqlStr, err := codeModeUpsertSQL(size, enabled)
+	if err != nil {
 		return err
 	}
-	var sql string
-	switch {
-	case size == 6 && enabled:
-		sql = "UPDATE bot_group_settings SET enable_6_code=1, enable_7_code=0, push_enabled=1 WHERE chat_id=?"
-	case size == 7 && enabled:
-		sql = "UPDATE bot_group_settings SET enable_7_code=1, enable_6_code=0, push_enabled=1 WHERE chat_id=?"
-	case size == 6 && !enabled:
-		sql = "UPDATE bot_group_settings SET enable_6_code=0 WHERE chat_id=?"
-	default: // size == 7 && !enabled
-		sql = "UPDATE bot_group_settings SET enable_7_code=0 WHERE chat_id=?"
+	if err := s.DB.Exec(sqlStr, chatID).Error; err != nil {
+		return err
 	}
-	res := s.DB.Exec(sql, chatID)
-	if res.Error != nil {
-		return res.Error
+	e6, e7, push, err := s.scanCodeFlags(chatID)
+	if err != nil {
+		return fmt.Errorf("SetCodeMode: 写入后校验失败 (chat_id=%s): %w", chatID, err)
 	}
-	if res.RowsAffected == 0 {
-		// MySQL reports 0 when values are unchanged; verify intended state.
-		row, err := s.GetGroupSettings(chatID)
-		if err != nil {
-			return err
-		}
-		ok := false
-		switch {
-		case size == 6 && enabled:
-			ok = row.Enable6Code && !row.Enable7Code && row.PushEnabled
-		case size == 7 && enabled:
-			ok = row.Enable7Code && !row.Enable6Code && row.PushEnabled
-		case size == 6 && !enabled:
-			ok = !row.Enable6Code
-		case size == 7 && !enabled:
-			ok = !row.Enable7Code
-		}
-		if !ok {
-			return fmt.Errorf("SetCodeMode: 未更新任何行 (chat_id=%s size=%d enabled=%v)", chatID, size, enabled)
-		}
+	if !codeModeVerifyOK(size, enabled, e6, e7, push) {
+		return fmt.Errorf("SetCodeMode: 写入后状态不符 (chat_id=%s size=%d enabled=%v enable_6=%d enable_7=%d push=%d)",
+			chatID, size, enabled, e6, e7, push)
 	}
 	return nil
 }
 
+// codeModeUpsertSQL returns MySQL upsert SQL; the sole bind arg is chat_id.
+func codeModeUpsertSQL(size int, enabled bool) (string, error) {
+	switch {
+	case size == 6 && enabled:
+		return `
+INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code, created_at, updated_at)
+VALUES (?, 1, 1, 0, NOW(3), NOW(3))
+ON DUPLICATE KEY UPDATE
+  push_enabled=VALUES(push_enabled),
+  enable_6_code=VALUES(enable_6_code),
+  enable_7_code=VALUES(enable_7_code),
+  updated_at=VALUES(updated_at)`, nil
+	case size == 7 && enabled:
+		return `
+INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code, created_at, updated_at)
+VALUES (?, 1, 0, 1, NOW(3), NOW(3))
+ON DUPLICATE KEY UPDATE
+  push_enabled=VALUES(push_enabled),
+  enable_6_code=VALUES(enable_6_code),
+  enable_7_code=VALUES(enable_7_code),
+  updated_at=VALUES(updated_at)`, nil
+	case size == 6 && !enabled:
+		// Disable only flips that flag; still upsert if the row is missing.
+		return `
+INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code, created_at, updated_at)
+VALUES (?, 0, 0, 0, NOW(3), NOW(3))
+ON DUPLICATE KEY UPDATE
+  enable_6_code=0,
+  updated_at=VALUES(updated_at)`, nil
+	case size == 7 && !enabled:
+		return `
+INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code, created_at, updated_at)
+VALUES (?, 0, 0, 0, NOW(3), NOW(3))
+ON DUPLICATE KEY UPDATE
+  enable_7_code=0,
+  updated_at=VALUES(updated_at)`, nil
+	default:
+		return "", errors.New("size 必须为 6 或 7")
+	}
+}
+
+func codeModeVerifyOK(size int, enabled bool, e6, e7, push int) bool {
+	switch {
+	case size == 6 && enabled:
+		return e6 != 0 && e7 == 0 && push != 0
+	case size == 7 && enabled:
+		return e7 != 0 && e6 == 0 && push != 0
+	case size == 6 && !enabled:
+		return e6 == 0
+	case size == 7 && !enabled:
+		return e7 == 0
+	default:
+		return false
+	}
+}
+
+func (s *Store) scanCodeFlags(chatID string) (e6, e7, push int, err error) {
+	err = s.DB.Raw(
+		`SELECT enable_6_code, enable_7_code, push_enabled FROM bot_group_settings WHERE chat_id=?`,
+		chatID,
+	).Row().Scan(&e6, &e7, &push)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return e6, e7, push, nil
+}
+
 // IsCodeEnabled reports whether the given code size is enabled for the chat.
 func (s *Store) IsCodeEnabled(chatID string, size int) (bool, error) {
-	chatID = strings.TrimSpace(chatID)
 	if size != 6 && size != 7 {
 		return false, errors.New("size 必须为 6 或 7")
 	}
-	var row domain.BotGroupSettings
-	err := s.DB.Where("chat_id = ?", chatID).First(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, nil
-	}
+	row, err := s.GetGroupSettings(chatID)
 	if err != nil {
 		return false, err
 	}
@@ -316,14 +383,46 @@ func Effective6Code(row domain.BotGroupSettings) bool {
 }
 
 // GetGroupSettings returns persisted settings for a chat, or zero value if missing.
+// Flag columns are scanned as ints then mapped to bool so tinyint/GORM bool
+// quirks cannot report enable_6_code=0 when the DB value is 1.
 func (s *Store) GetGroupSettings(chatID string) (domain.BotGroupSettings, error) {
 	chatID = strings.TrimSpace(chatID)
-	var row domain.BotGroupSettings
-	err := s.DB.Where("chat_id = ?", chatID).First(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+	var (
+		row                domain.BotGroupSettings
+		push, e6, e7       int
+		title, user, ctype sql.NullString
+		created, updated   sql.NullTime
+	)
+	err := s.DB.Raw(`
+SELECT id, chat_id, title, username, chat_type,
+       push_enabled, enable_6_code, enable_7_code, created_at, updated_at
+FROM bot_group_settings WHERE chat_id=?`, chatID).Row().Scan(
+		&row.ID, &row.ChatID, &title, &user, &ctype,
+		&push, &e6, &e7, &created, &updated,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
 		return domain.BotGroupSettings{ChatID: chatID}, nil
 	}
-	return row, err
+	if err != nil {
+		// Some drivers surface no-rows differently through GORM Raw.
+		if errors.Is(err, gorm.ErrRecordNotFound) || err.Error() == "sql: no rows in result set" {
+			return domain.BotGroupSettings{ChatID: chatID}, nil
+		}
+		return row, err
+	}
+	row.Title = title.String
+	row.Username = user.String
+	row.ChatType = ctype.String
+	row.PushEnabled = push != 0
+	row.Enable6Code = e6 != 0
+	row.Enable7Code = e7 != 0
+	if created.Valid {
+		row.CreatedAt = created.Time
+	}
+	if updated.Valid {
+		row.UpdatedAt = updated.Time
+	}
+	return row, nil
 }
 
 // FormatGroupCodeState summarizes push / 6 / 7 flags and effective send modes.
@@ -436,4 +535,3 @@ func (s *Store) DeleteMember(chatID, userID string) error {
 	}
 	return s.DB.Where("chat_id = ? AND user_id = ?", chatID, userID).Delete(&domain.BotGroupMember{}).Error
 }
-
