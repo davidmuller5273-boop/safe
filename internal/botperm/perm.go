@@ -232,6 +232,8 @@ func (s *Store) ListPushTargets() ([]domain.BotGroupSettings, error) {
 }
 
 // SetCodeMode enables/disables 6-code or 7-code predictions for a group.
+// Enabling one mode turns on push and turns the other mode off so a single
+// /开启6码 or /开启7码 is enough.
 func (s *Store) SetCodeMode(chatID string, size int, enabled bool) error {
 	chatID = strings.TrimSpace(chatID)
 	if chatID == "" {
@@ -243,11 +245,21 @@ func (s *Store) SetCodeMode(chatID string, size int, enabled bool) error {
 	if err := s.EnsureGroup(chatID); err != nil {
 		return err
 	}
-	field := "enable_6_code"
-	if size == 7 {
-		field = "enable_7_code"
+	updates := map[string]any{}
+	if size == 6 {
+		updates["enable_6_code"] = enabled
+		if enabled {
+			updates["enable_7_code"] = false
+			updates["push_enabled"] = true
+		}
+	} else {
+		updates["enable_7_code"] = enabled
+		if enabled {
+			updates["enable_6_code"] = false
+			updates["push_enabled"] = true
+		}
 	}
-	return s.DB.Model(&domain.BotGroupSettings{}).Where("chat_id = ?", chatID).Update(field, enabled).Error
+	return s.DB.Model(&domain.BotGroupSettings{}).Where("chat_id = ?", chatID).Updates(updates).Error
 }
 
 // IsCodeEnabled reports whether the given code size is enabled for the chat.

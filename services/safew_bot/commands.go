@@ -33,9 +33,9 @@ func helpForRole(role string) string {
 	super := `
 推送（开发者 / 超级管理员）：
 /push on|off [chat_id] — 开启或关闭群推送（进群默认关闭）
-/开启6码 — 本群开启6码预测推送
+/开启6码 — 本群只推6码（自动开推送并关闭7码）
 /关闭6码 — 本群关闭6码预测推送
-/开启7码 — 本群开启7码预测推送
+/开启7码 — 本群只推7码（自动开推送并关闭6码）
 /关闭7码 — 本群关闭7码预测推送
 /broadcast <文本> — 向「已开启推送」的群发送
 
@@ -56,9 +56,9 @@ func helpForRole(role string) string {
 /clearsuffix global`
 	switch role {
 	case botperm.RoleDeveloper:
-		return "【开发者菜单】\n" + common + groupAdmin + adsGlobal + super + "\n\n说明：机器人进群后默认不推送；推送需同时开启6码和/或7码；对外正文一次 sendMessage 发送。"
+		return "【开发者菜单】\n" + common + groupAdmin + adsGlobal + super + "\n\n说明：进群默认不推送；发 /开启6码 或 /开启7码 即可（自动开推送并关掉另一种）；对外正文一次 sendMessage 发送。"
 	case botperm.RoleAdmin:
-		return "【超级管理员菜单】\n" + common + groupAdmin + adsGlobal + super + "\n\n说明：进群默认不推送；推送需开启6/7码；不能添加/移除其他超级管理员。"
+		return "【超级管理员菜单】\n" + common + groupAdmin + adsGlobal + super + "\n\n说明：进群默认不推送；发 /开启6码 或 /开启7码 即可；不能添加/移除其他超级管理员。"
 	case botperm.RoleGroupAdmin:
 		return "【群管理员菜单】\n" + common + groupAdmin + "\n\n说明：仅可管理本群广告与 /say；不能开关推送或6/7码。"
 	default:
@@ -423,13 +423,19 @@ func (w worker) cmdSetCodeMode(ctx context.Context, botConfig systemconfig.SafeW
 	if err != nil {
 		return err
 	}
-	action := "已关闭"
 	if enabled {
-		action = "已开启"
+		other := 7
+		if size == 7 {
+			other = 6
+		}
+		return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(
+			"已切换为本群只推 %d码（已开推送，已关 %d码）\n%s",
+			size, other, botperm.FormatGroupCodeState(settings),
+		))
 	}
 	return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(
-		"%s %d码预测: %s\n%s",
-		action, size, chatID, botperm.FormatGroupCodeState(settings),
+		"已关闭 %d码预测\n%s",
+		size, botperm.FormatGroupCodeState(settings),
 	))
 }
 
