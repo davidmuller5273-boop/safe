@@ -212,7 +212,7 @@ func buildPredictionMessage(lotteryName string, size int, table string, stats30,
 		size = hotnumber.Size
 	}
 	return fmt.Sprintf(
-		"<b>%s %d码热号预测</b>\n<pre>%s</pre>\n\n--------------------\n<b>📊 周期胜率概览</b>\n30期：%.1f%%｜180期：%.1f%%\n近三小时最大连错：%d期❌\n近三小时最大连中：%d期✅",
+		"<b>%s %d码热号预测</b>\n<pre>%s</pre>\n\n--------------------\n<b>📊 周期胜率概览</b>\n30期：%.1f%%｜180期：%.1f%%\n近三小时最大连错❌：%d期\n近三小时最大连中✅：%d期",
 		html.EscapeString(lotteryName),
 		size,
 		html.EscapeString(table),
