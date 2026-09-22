@@ -126,25 +126,32 @@ func mergeMistakenCodeColumns(db *gorm.DB) error {
 }
 
 func mysqlColumnExists(db *gorm.DB, table, column string) (bool, error) {
-	// SHOW COLUMNS is scoped to the current database connection; more reliable
-	// than information_schema + DATABASE() under some MySQL privilege setups.
-	type colRow struct {
-		Field string `gorm:"column:Field"`
+	if !isSafeSQLIdent(table) || !isSafeSQLIdent(column) {
+		return false, fmt.Errorf("invalid SQL identifier: %s.%s", table, column)
 	}
-	var rows []colRow
-	err := db.Raw(fmt.Sprintf("SHOW COLUMNS FROM `%s` LIKE ?", table), column).Scan(&rows).Error
-	if err != nil {
-		if isUnknownColumn(err) {
-			return false, nil
+	// Probe with SELECT ... LIMIT 0. Avoid SHOW/information_schema placeholders
+	// (MySQL rejects ? in SHOW COLUMNS LIKE).
+	err := db.Exec(fmt.Sprintf("SELECT `%s` FROM `%s` LIMIT 0", column, table)).Error
+	if err == nil {
+		return true, nil
+	}
+	if isUnknownColumn(err) {
+		return false, nil
+	}
+	return false, err
+}
+
+func isSafeSQLIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			continue
 		}
-		return false, err
+		return false
 	}
-	for _, r := range rows {
-		if strings.EqualFold(r.Field, column) {
-			return true, nil
-		}
-	}
-	return false, nil
+	return true
 }
 
 func isUnknownColumn(err error) bool {
