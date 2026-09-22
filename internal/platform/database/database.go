@@ -35,7 +35,46 @@ func Open(host string, port int, user, password, database string) (*gorm.DB, err
 	if err = ensureHotNumberPredictionSchema(db); err != nil {
 		return nil, err
 	}
+	if err = ensureBotGroupSettingsSchema(db); err != nil {
+		return nil, err
+	}
 	return db, seed(db)
+}
+
+// ensureBotGroupSettingsSchema adds columns AutoMigrate sometimes skips on
+// existing MySQL tables (e.g. enable_6_code / enable_7_code).
+func ensureBotGroupSettingsSchema(db *gorm.DB) error {
+	type col struct {
+		field string
+		ddl   string
+	}
+	cols := []col{
+		{"Title", "ALTER TABLE `bot_group_settings` ADD COLUMN `title` varchar(255) DEFAULT NULL"},
+		{"Username", "ALTER TABLE `bot_group_settings` ADD COLUMN `username` varchar(128) DEFAULT NULL"},
+		{"ChatType", "ALTER TABLE `bot_group_settings` ADD COLUMN `chat_type` varchar(32) DEFAULT NULL"},
+		{"Enable6Code", "ALTER TABLE `bot_group_settings` ADD COLUMN `enable_6_code` tinyint(1) NOT NULL DEFAULT 0"},
+		{"Enable7Code", "ALTER TABLE `bot_group_settings` ADD COLUMN `enable_7_code` tinyint(1) NOT NULL DEFAULT 0"},
+	}
+	for _, c := range cols {
+		if db.Migrator().HasColumn(&domain.BotGroupSettings{}, c.field) {
+			continue
+		}
+		if err := db.Exec(c.ddl).Error; err != nil {
+			if isDuplicateColumn(err) {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func isDuplicateColumn(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "1060") || strings.Contains(msg, "Duplicate column")
 }
 
 // ensureHotNumberPredictionSchema adds code_size defaults and a composite unique
