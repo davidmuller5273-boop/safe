@@ -7,6 +7,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 	"strings"
 )
 
@@ -129,9 +130,9 @@ func mysqlColumnExists(db *gorm.DB, table, column string) (bool, error) {
 	if !isSafeSQLIdent(table) || !isSafeSQLIdent(column) {
 		return false, fmt.Errorf("invalid SQL identifier: %s.%s", table, column)
 	}
-	// Probe with SELECT ... LIMIT 0. Avoid SHOW/information_schema placeholders
-	// (MySQL rejects ? in SHOW COLUMNS LIKE).
-	err := db.Exec(fmt.Sprintf("SELECT `%s` FROM `%s` LIMIT 0", column, table)).Error
+	// Probe with SELECT ... LIMIT 0. Silence expected "unknown column" noise.
+	silent := db.Session(&gorm.Session{Logger: logger.Default.LogMode(logger.Silent)})
+	err := silent.Exec(fmt.Sprintf("SELECT `%s` FROM `%s` LIMIT 0", column, table)).Error
 	if err == nil {
 		return true, nil
 	}
