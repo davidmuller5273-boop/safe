@@ -112,6 +112,8 @@ func (w worker) runCommands(ctx context.Context) error {
 			}
 			if err := w.handleCommand(ctx, botConfig, update.Message); err != nil {
 				log.Printf("处理命令失败: %v", err)
+				chatID := update.Message.Chat.IDString()
+				_ = w.replyPlain(ctx, botConfig.Token, chatID, "命令失败: "+err.Error())
 			}
 		}
 	}
