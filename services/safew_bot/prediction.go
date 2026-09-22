@@ -12,75 +12,87 @@ import (
 	"github.com/davidmuller5273-boop/safe/internal/queue"
 )
 
-// predictionMessage evaluates the current issue and prepares a prediction for
-// the next issue. ready is false until seven distinct historical hot numbers
-// are available.
-func (w worker) predictionMessage(message queue.LotteryDrawMessage) (text string, ready bool, err error) {
+var predictionSizes = []int{hotnumber.Size6, hotnumber.Size}
+
+// predictionMessage evaluates the current issue and prepares predictions for
+// both 6-code and 7-code modes when enough history exists.
+// ready is true when at least one size can be rendered.
+func (w worker) predictionMessage(message queue.LotteryDrawMessage) (texts map[int]string, ready bool, err error) {
+	texts = make(map[int]string)
 	if message.LotteryTypeID == 0 {
 		var record domain.DrawRecord
 		if err := w.db.Select("lottery_type_id").First(&record, message.RecordID).Error; err != nil {
-			return "", false, err
+			return nil, false, err
 		}
 		message.LotteryTypeID = record.LotteryTypeID
 	}
 	actual, err := hotnumber.FromDrawResult(message.Result)
 	if err != nil {
-		return "", false, err
+		return nil, false, err
 	}
 
-	numbers, err := w.recentHotNumbers(message.LotteryTypeID, message.IssueNumber)
-	if err != nil {
-		return "", false, err
-	}
-	if len(numbers) < hotnumber.Size {
-		nextNumbers, err := w.recentHotNumbers(message.LotteryTypeID, message.NextIssueNumber)
+	for _, size := range predictionSizes {
+		numbers, err := w.recentHotNumbers(message.LotteryTypeID, message.IssueNumber, size)
 		if err != nil {
-			return "", false, err
+			return nil, false, err
 		}
-		if len(nextNumbers) == hotnumber.Size {
-			if _, err := w.savePrediction(message.LotteryTypeID, message.NextIssueNumber, nextNumbers); err != nil {
-				return "", false, err
+		if len(numbers) < size {
+			nextNumbers, err := w.recentHotNumbers(message.LotteryTypeID, message.NextIssueNumber, size)
+			if err != nil {
+				return nil, false, err
+			}
+			if len(nextNumbers) == size {
+				if _, err := w.savePrediction(message.LotteryTypeID, message.NextIssueNumber, nextNumbers, size); err != nil {
+					return nil, false, err
+				}
+			}
+			continue
+		}
+		prediction, err := w.savePrediction(message.LotteryTypeID, message.IssueNumber, numbers, size)
+		if err != nil {
+			return nil, false, err
+		}
+		correct := hotnumber.Contains(numbers, actual)
+		now := time.Now()
+		if err := w.db.Model(&prediction).Updates(map[string]any{
+			"actual_hot_number": actual,
+			"correct":           correct,
+			"evaluated_at":      &now,
+		}).Error; err != nil {
+			return nil, false, err
+		}
+
+		nextNumbers, err := w.recentHotNumbers(message.LotteryTypeID, message.NextIssueNumber, size)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(nextNumbers) == size {
+			if _, err := w.savePrediction(message.LotteryTypeID, message.NextIssueNumber, nextNumbers, size); err != nil {
+				return nil, false, err
 			}
 		}
-		return "", false, nil
-	}
-	prediction, err := w.savePrediction(message.LotteryTypeID, message.IssueNumber, numbers)
-	if err != nil {
-		return "", false, err
-	}
-	correct := hotnumber.Contains(numbers, actual)
-	now := time.Now()
-	if err := w.db.Model(&prediction).Updates(map[string]any{
-		"actual_hot_number": actual,
-		"correct":           correct,
-		"evaluated_at":      &now,
-	}).Error; err != nil {
-		return "", false, err
-	}
-
-	nextNumbers, err := w.recentHotNumbers(message.LotteryTypeID, message.NextIssueNumber)
-	if err != nil {
-		return "", false, err
-	}
-	if len(nextNumbers) == hotnumber.Size {
-		if _, err := w.savePrediction(message.LotteryTypeID, message.NextIssueNumber, nextNumbers); err != nil {
-			return "", false, err
+		text, err := w.renderPredictionHistory(message.LotteryTypeID, message.LotteryName, size)
+		if err != nil {
+			return nil, false, err
 		}
+		texts[size] = text
 	}
-	text, err = w.renderPredictionHistory(message.LotteryTypeID, message.LotteryName)
-	return text, true, err
+	return texts, len(texts) > 0, nil
 }
 
-func (w worker) recentHotNumbers(lotteryTypeID uint, beforeIssue string) ([]string, error) {
+func (w worker) recentHotNumbers(lotteryTypeID uint, beforeIssue string, size int) ([]string, error) {
 	var records []domain.DrawRecord
 	if err := w.db.Where("lottery_type_id = ? AND issue_number < ?", lotteryTypeID, beforeIssue).Order("issue_number DESC").Limit(100).Find(&records).Error; err != nil {
 		return nil, err
 	}
-	return hotNumbersFromRecords(records, beforeIssue)
+	return hotNumbersFromRecords(records, beforeIssue, size)
 }
 
-func hotNumbersFromRecords(records []domain.DrawRecord, beforeIssue string) ([]string, error) {
-	numbers := make([]string, 0, hotnumber.Size)
+func hotNumbersFromRecords(records []domain.DrawRecord, beforeIssue string, size int) ([]string, error) {
+	if size <= 0 {
+		size = hotnumber.Size
+	}
+	numbers := make([]string, 0, size)
 	for _, record := range records {
 		if record.IssueNumber >= beforeIssue {
 			continue
@@ -96,14 +108,18 @@ func hotNumbersFromRecords(records []domain.DrawRecord, beforeIssue string) ([]s
 		if !hotnumber.Contains(numbers, actual) {
 			numbers = append(numbers, actual)
 		}
-		if len(numbers) == hotnumber.Size {
+		if len(numbers) == size {
 			break
 		}
 	}
 	return numbers, nil
 }
 
-func (w worker) savePrediction(lotteryTypeID uint, issue string, numbers []string) (domain.HotNumberPrediction, error) {
+func (w worker) savePrediction(lotteryTypeID uint, issue string, numbers []string, size int) (domain.HotNumberPrediction, error) {
+	if size <= 0 {
+		size = hotnumber.Size
+	}
+	numbers = hotnumber.TakeFirst(numbers, size)
 	state, err := json.Marshal(numbers)
 	if err != nil {
 		return domain.HotNumberPrediction{}, err
@@ -111,20 +127,24 @@ func (w worker) savePrediction(lotteryTypeID uint, issue string, numbers []strin
 	prediction := domain.HotNumberPrediction{
 		LotteryTypeID: lotteryTypeID,
 		IssueNumber:   issue,
+		CodeSize:      size,
 		HotNumbers:    string(state),
 		Prediction:    hotnumber.Prediction(numbers),
 	}
-	err = w.db.Where("lottery_type_id = ? AND issue_number = ?", lotteryTypeID, issue).
-		Assign(map[string]any{"hot_numbers": prediction.HotNumbers, "prediction": prediction.Prediction}).
+	err = w.db.Where("lottery_type_id = ? AND issue_number = ? AND code_size = ?", lotteryTypeID, issue, size).
+		Assign(map[string]any{"hot_numbers": prediction.HotNumbers, "prediction": prediction.Prediction, "code_size": size}).
 		FirstOrCreate(&prediction).Error
 	return prediction, err
 }
 
-func (w worker) renderPredictionHistory(lotteryTypeID uint, lotteryName string) (string, error) {
+func (w worker) renderPredictionHistory(lotteryTypeID uint, lotteryName string, size int) (string, error) {
+	if size <= 0 {
+		size = hotnumber.Size
+	}
 	var predictions []domain.HotNumberPrediction
 	// Include the next, unevaluated prediction. Fetch one extra row so the
 	// statistics can still cover 180 completed issues.
-	if err := w.db.Where("lottery_type_id = ?", lotteryTypeID).Order("issue_number DESC").Limit(181).Find(&predictions).Error; err != nil {
+	if err := w.db.Where("lottery_type_id = ? AND code_size = ?", lotteryTypeID, size).Order("issue_number DESC").Limit(181).Find(&predictions).Error; err != nil {
 		return "", err
 	}
 	var records []domain.DrawRecord
@@ -138,11 +158,11 @@ func (w worker) renderPredictionHistory(lotteryTypeID uint, lotteryName string) 
 		recordsByIssue[record.IssueNumber] = record
 	}
 	for i := range predictions {
-		numbers, err := hotNumbersFromRecords(records, predictions[i].IssueNumber)
+		numbers, err := hotNumbersFromRecords(records, predictions[i].IssueNumber, size)
 		if err != nil {
 			return "", err
 		}
-		if len(numbers) == hotnumber.Size {
+		if len(numbers) == size {
 			state, err := json.Marshal(numbers)
 			if err != nil {
 				return "", err
@@ -184,8 +204,9 @@ func (w worker) renderPredictionHistory(lotteryTypeID uint, lotteryName string) 
 	stats30 := calculateStats(predictions, 30)
 	stats180 := calculateStats(predictions, 180)
 	return fmt.Sprintf(
-		"<b>%s 热号预测</b>\n<pre>%s</pre>\n\n--------------------\n<b>📊 周期胜率概览</b>\n30期：%.1f%%｜180期：%.1f%%\n近三小时最大莲错：%d期\n近三小时最大莲中：%d期",
+		"<b>%s %d码热号预测</b>\n<pre>%s</pre>\n\n--------------------\n<b>📊 周期胜率概览</b>\n30期：%.1f%%｜180期：%.1f%%\n近三小时最大连错：%d❌期\n近三小时最大连中：%d✅期",
 		html.EscapeString(lotteryName),
+		size,
 		html.EscapeString(table),
 		stats30.WinRate,
 		stats180.WinRate,

@@ -82,16 +82,19 @@ func (q *LotteryDrawQueueClient) Ack(ctx context.Context, payload string) error 
 	return q.client.LRem(ctx, LotteryDrawProcessing, 1, payload).Err()
 }
 
-func (q *LotteryDrawQueueClient) WasSent(ctx context.Context, recordID uint, chatID string) (bool, error) {
-	count, err := q.client.Exists(ctx, sentKey(recordID, chatID)).Result()
+func (q *LotteryDrawQueueClient) WasSent(ctx context.Context, recordID uint, chatID, kind string) (bool, error) {
+	count, err := q.client.Exists(ctx, sentKey(recordID, chatID, kind)).Result()
 	return count > 0, err
 }
 
-func (q *LotteryDrawQueueClient) MarkSent(ctx context.Context, recordID uint, chatID string) error {
-	return q.client.Set(ctx, sentKey(recordID, chatID), "1", 30*24*time.Hour).Err()
+func (q *LotteryDrawQueueClient) MarkSent(ctx context.Context, recordID uint, chatID, kind string) error {
+	return q.client.Set(ctx, sentKey(recordID, chatID, kind), "1", 30*24*time.Hour).Err()
 }
 
-func sentKey(recordID uint, chatID string) string {
+func sentKey(recordID uint, chatID, kind string) string {
 	hash := sha256.Sum256([]byte(chatID))
-	return fmt.Sprintf("safe:sent:lottery_draw:%d:%x", recordID, hash[:8])
+	if kind == "" {
+		return fmt.Sprintf("safe:sent:lottery_draw:%d:%x", recordID, hash[:8])
+	}
+	return fmt.Sprintf("safe:sent:lottery_draw:%d:%x:%s", recordID, hash[:8], kind)
 }

@@ -21,6 +21,8 @@ func helpForRole(role string) string {
 /pushstatus — 查看本群推送是否开启`
 	groupAdmin := `
 广告（本群）：
+/广告前 <文本> — 设置本群前广告（空文本则清空）
+/广告后 <文本> — 设置本群后广告（空文本则清空）
 /setprefix [group] <文本>
 /setsuffix [group] <文本>
 /clearprefix [group]
@@ -31,6 +33,10 @@ func helpForRole(role string) string {
 	super := `
 推送（开发者 / 超级管理员）：
 /push on|off [chat_id] — 开启或关闭群推送（进群默认关闭）
+/开启6码 — 本群开启6码预测推送
+/关闭6码 — 本群关闭6码预测推送
+/开启7码 — 本群开启7码预测推送
+/关闭7码 — 本群关闭7码预测推送
 /broadcast <文本> — 向「已开启推送」的群发送
 
 超级管理员管理（仅开发者）：
@@ -50,11 +56,11 @@ func helpForRole(role string) string {
 /clearsuffix global`
 	switch role {
 	case botperm.RoleDeveloper:
-		return "【开发者菜单】\n" + common + groupAdmin + adsGlobal + super + "\n\n说明：机器人进群后默认不推送；对外正文一次 sendMessage 发送。"
+		return "【开发者菜单】\n" + common + groupAdmin + adsGlobal + super + "\n\n说明：机器人进群后默认不推送；推送需同时开启6码和/或7码；对外正文一次 sendMessage 发送。"
 	case botperm.RoleAdmin:
-		return "【超级管理员菜单】\n" + common + groupAdmin + adsGlobal + super + "\n\n说明：进群默认不推送；不能添加/移除其他超级管理员。"
+		return "【超级管理员菜单】\n" + common + groupAdmin + adsGlobal + super + "\n\n说明：进群默认不推送；推送需开启6/7码；不能添加/移除其他超级管理员。"
 	case botperm.RoleGroupAdmin:
-		return "【群管理员菜单】\n" + common + groupAdmin + "\n\n说明：仅可管理本群广告与 /say；不能开关推送。"
+		return "【群管理员菜单】\n" + common + groupAdmin + "\n\n说明：仅可管理本群广告与 /say；不能开关推送或6/7码。"
 	default:
 		return "【普通用户菜单】\n" + common + "\n\n无更多权限请联系开发者或超级管理员。"
 	}
@@ -188,6 +194,18 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 			return w.replyPlain(ctx, botConfig.Token, chatID, "已开启推送: "+targetChat)
 		}
 		return w.replyPlain(ctx, botConfig.Token, chatID, "已关闭推送: "+targetChat)
+	case "/开启6码":
+		return w.cmdSetCodeMode(ctx, botConfig, userID, chatID, 6, true)
+	case "/关闭6码":
+		return w.cmdSetCodeMode(ctx, botConfig, userID, chatID, 6, false)
+	case "/开启7码":
+		return w.cmdSetCodeMode(ctx, botConfig, userID, chatID, 7, true)
+	case "/关闭7码":
+		return w.cmdSetCodeMode(ctx, botConfig, userID, chatID, 7, false)
+	case "/广告前":
+		return w.cmdChineseAd(ctx, botConfig, userID, chatID, args, true)
+	case "/广告后":
+		return w.cmdChineseAd(ctx, botConfig, userID, chatID, args, false)
 	case "/adstatus":
 		ok, err := w.perms.CanControlSensitive(userID, chatID)
 		if err != nil {
@@ -387,6 +405,52 @@ func roleOrNone(role string) string {
 		return "none"
 	}
 	return role
+}
+
+func (w worker) cmdSetCodeMode(ctx context.Context, botConfig systemconfig.SafeW, userID, chatID string, size int, enabled bool) error {
+	ok, err := w.perms.CanTogglePush(userID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return w.replyPlain(ctx, botConfig.Token, chatID, "权限不足（需要开发者或超级管理员）")
+	}
+	if err := w.perms.SetCodeMode(chatID, size, enabled); err != nil {
+		return err
+	}
+	action := "已关闭"
+	if enabled {
+		action = "已开启"
+	}
+	return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf("%s %d码预测: %s", action, size, chatID))
+}
+
+func (w worker) cmdChineseAd(ctx context.Context, botConfig systemconfig.SafeW, userID, chatID, args string, isPrefix bool) error {
+	ok, err := w.perms.CanControlSensitive(userID, chatID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return w.replyPlain(ctx, botConfig.Token, chatID, "权限不足")
+	}
+	content := strings.TrimSpace(args)
+	which := "后广告"
+	if isPrefix {
+		which = "前广告"
+	}
+	// Empty content clears that side for the group.
+	if isPrefix {
+		err = ads.SaveGroup(w.db, chatID, &content, nil)
+	} else {
+		err = ads.SaveGroup(w.db, chatID, nil, &content)
+	}
+	if err != nil {
+		return err
+	}
+	if content == "" {
+		return w.replyPlain(ctx, botConfig.Token, chatID, "已清空本群"+which)
+	}
+	return w.replyPlain(ctx, botConfig.Token, chatID, "已更新本群"+which)
 }
 
 func (w worker) cmdSetAd(ctx context.Context, botConfig systemconfig.SafeW, userID, chatID, args string, isPrefix bool) error {

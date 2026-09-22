@@ -3,6 +3,7 @@ package safewbot
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -86,11 +87,11 @@ func (w worker) runQueue(ctx context.Context) error {
 
 		for {
 			var botConfig systemconfig.SafeW
-			messageText, ready, err := w.predictionMessage(message)
+			texts, ready, err := w.predictionMessage(message)
 			if err == nil && ready {
 				botConfig, err = systemconfig.LoadSafeW(w.db)
 				if err == nil {
-					err = w.sendToChats(ctx, botConfig, message, messageText)
+					err = w.sendToChats(ctx, botConfig, message, texts)
 				}
 			}
 			if err == nil {
@@ -99,9 +100,9 @@ func (w worker) runQueue(ctx context.Context) error {
 					return err
 				}
 				if ready {
-					log.Printf("SafeW 热号预测消息发送成功: issue=%s groups=%d", message.IssueNumber, len(systemconfig.NormalizeChatIDs(botConfig.ChatIDs)))
+					log.Printf("SafeW 热号预测消息发送成功: issue=%s sizes=%v", message.IssueNumber, mapKeys(texts))
 				} else {
-					log.Printf("热号样本尚不足 7 个，本期不发送: issue=%s", message.IssueNumber)
+					log.Printf("热号样本尚不足，本期不发送: issue=%s", message.IssueNumber)
 				}
 				break
 			}
@@ -116,36 +117,65 @@ func (w worker) runQueue(ctx context.Context) error {
 	}
 }
 
-func (w worker) sendToChats(ctx context.Context, botConfig systemconfig.SafeW, message queue.LotteryDrawMessage, text string) error {
-	ids, err := w.perms.ListPushEnabledChatIDs()
+func (w worker) sendToChats(ctx context.Context, botConfig systemconfig.SafeW, message queue.LotteryDrawMessage, texts map[int]string) error {
+	targets, err := w.perms.ListPushTargets()
 	if err != nil {
 		return err
 	}
-	if len(ids) == 0 {
+	if len(targets) == 0 {
 		log.Printf("没有已开启推送的群，跳过开奖推送: issue=%s", message.IssueNumber)
 		return nil
 	}
-	for _, chatID := range ids {
-		sent, err := w.queue.WasSent(ctx, message.RecordID, chatID)
-		if err != nil {
-			return err
-		}
-		if sent {
+	for _, group := range targets {
+		chatID := group.ChatID
+		want6 := botperm.Effective6Code(group)
+		want7 := botperm.Effective7Code(group)
+		if !want6 && !want7 {
+			log.Printf("群已开推送但未开启6/7码，跳过: chat=%s issue=%s", chatID, message.IssueNumber)
 			continue
 		}
-		// Single sendMessage with ads wrapped around prediction body.
-		outbound, err := ads.Wrap(w.db, chatID, text)
-		if err != nil {
-			return err
+		sizes := make([]int, 0, 2)
+		if want6 {
+			sizes = append(sizes, 6)
 		}
-		if err := w.client.SendMessage(ctx, botConfig.Token, chatID, outbound); err != nil {
-			return err
+		if want7 {
+			sizes = append(sizes, 7)
 		}
-		if err := w.queue.MarkSent(ctx, message.RecordID, chatID); err != nil {
-			return err
+		for _, size := range sizes {
+			body, ok := texts[size]
+			if !ok || body == "" {
+				log.Printf("群需要 %d码 但本期文本未就绪，跳过: chat=%s issue=%s", size, chatID, message.IssueNumber)
+				continue
+			}
+			kind := fmt.Sprintf("%d", size)
+			sent, err := w.queue.WasSent(ctx, message.RecordID, chatID, kind)
+			if err != nil {
+				return err
+			}
+			if sent {
+				continue
+			}
+			outbound, err := ads.Wrap(w.db, chatID, body)
+			if err != nil {
+				return err
+			}
+			if err := w.client.SendMessage(ctx, botConfig.Token, chatID, outbound); err != nil {
+				return err
+			}
+			if err := w.queue.MarkSent(ctx, message.RecordID, chatID, kind); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+func mapKeys(m map[int]string) []int {
+	keys := make([]int, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 func wait(ctx context.Context, duration time.Duration) bool {

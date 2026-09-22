@@ -6,7 +6,10 @@ import (
 	"strings"
 )
 
-const Size = 7
+const (
+	Size  = 7
+	Size6 = 6
+)
 
 // FromDrawResult returns the first-place number using 0 to represent car 10.
 func FromDrawResult(result []string) (string, error) {
@@ -47,4 +50,15 @@ func Contains(numbers []string, actual string) bool {
 		}
 	}
 	return false
+}
+
+// TakeFirst returns the first n elements of numbers, or all of them if shorter.
+func TakeFirst(numbers []string, n int) []string {
+	if n <= 0 {
+		return []string{}
+	}
+	if len(numbers) <= n {
+		return append([]string(nil), numbers...)
+	}
+	return append([]string(nil), numbers[:n]...)
 }

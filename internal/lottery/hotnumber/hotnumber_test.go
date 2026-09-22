@@ -25,3 +25,19 @@ func TestContainsEvaluatesFirstHotNumber(t *testing.T) {
 		t.Fatal("expected hot number 3 to be incorrect")
 	}
 }
+
+func TestTakeFirst(t *testing.T) {
+	nums := []string{"1", "2", "3", "4", "5", "6", "7"}
+	got := TakeFirst(nums, Size6)
+	if len(got) != 6 || got[5] != "6" {
+		t.Fatalf("TakeFirst size6 = %v", got)
+	}
+	got = TakeFirst(nums[:3], 6)
+	if len(got) != 3 {
+		t.Fatalf("TakeFirst shorter = %v", got)
+	}
+	got = TakeFirst(nums, 0)
+	if len(got) != 0 {
+		t.Fatalf("TakeFirst zero = %v", got)
+	}
+}

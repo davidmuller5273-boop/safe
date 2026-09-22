@@ -105,8 +105,20 @@ func (s *Store) CanManageGroupAdmins(actorID string) (bool, error) {
 	return s.IsAdmin(actorID)
 }
 
+// CanControlSensitive: developer, 超级管理员, or group admin of that chat.
 func (s *Store) CanControlSensitive(actorID, chatID string) (bool, error) {
-	return s.IsGroupAdmin(actorID, chatID)
+	actorID = strings.TrimSpace(actorID)
+	chatID = strings.TrimSpace(chatID)
+	if s.IsDeveloper(actorID) {
+		return true, nil
+	}
+	ok, err := s.IsAdmin(actorID)
+	if err != nil || ok {
+		return ok, err
+	}
+	var count int64
+	err = s.DB.Model(&domain.BotGroupAdmin{}).Where("user_id = ? AND chat_id = ?", actorID, chatID).Count(&count).Error
+	return count > 0, err
 }
 
 // CanTogglePush: developer or 超级管理员 only.
@@ -200,8 +212,8 @@ func (s *Store) IsPushEnabled(chatID string) (bool, error) {
 }
 
 func (s *Store) ListPushEnabledChatIDs() ([]string, error) {
-	var rows []domain.BotGroupSettings
-	if err := s.DB.Where("push_enabled = ?", true).Order("id").Find(&rows).Error; err != nil {
+	rows, err := s.ListPushTargets()
+	if err != nil {
 		return nil, err
 	}
 	out := make([]string, 0, len(rows))
@@ -209,6 +221,65 @@ func (s *Store) ListPushEnabledChatIDs() ([]string, error) {
 		out = append(out, r.ChatID)
 	}
 	return out, nil
+}
+
+// ListPushTargets returns groups with PushEnabled=true (includes code-mode fields).
+func (s *Store) ListPushTargets() ([]domain.BotGroupSettings, error) {
+	var rows []domain.BotGroupSettings
+	err := s.DB.Where("push_enabled = ?", true).Order("id").Find(&rows).Error
+	return rows, err
+}
+
+// SetCodeMode enables/disables 6-code or 7-code predictions for a group.
+func (s *Store) SetCodeMode(chatID string, size int, enabled bool) error {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return errors.New("chat_id 不能为空")
+	}
+	if size != 6 && size != 7 {
+		return errors.New("size 必须为 6 或 7")
+	}
+	if err := s.EnsureGroup(chatID); err != nil {
+		return err
+	}
+	field := "enable_6_code"
+	if size == 7 {
+		field = "enable_7_code"
+	}
+	return s.DB.Model(&domain.BotGroupSettings{}).Where("chat_id = ?", chatID).Update(field, enabled).Error
+}
+
+// IsCodeEnabled reports whether the given code size is enabled for the chat.
+// Size 7 falls back to true when push is on and neither mode has been set
+// (backward compatible with groups that only toggled /push).
+func (s *Store) IsCodeEnabled(chatID string, size int) (bool, error) {
+	chatID = strings.TrimSpace(chatID)
+	if size != 6 && size != 7 {
+		return false, errors.New("size 必须为 6 或 7")
+	}
+	var row domain.BotGroupSettings
+	err := s.DB.Where("chat_id = ?", chatID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if size == 6 {
+		return row.Enable6Code, nil
+	}
+	return Effective7Code(row), nil
+}
+
+// Effective7Code is true when Enable7Code is set, or when push is on and
+// neither 6 nor 7 mode has been configured (legacy groups).
+func Effective7Code(row domain.BotGroupSettings) bool {
+	return row.Enable7Code || (row.PushEnabled && !row.Enable6Code && !row.Enable7Code)
+}
+
+// Effective6Code is true when Enable6Code is set.
+func Effective6Code(row domain.BotGroupSettings) bool {
+	return row.Enable6Code
 }
 
 

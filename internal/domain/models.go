@@ -65,12 +65,14 @@ type DrawRecord struct {
 	UpdatedAt         time.Time   `json:"updated_at"`
 }
 
-// HotNumberPrediction stores the ordered seven-number state used to predict
+// HotNumberPrediction stores the ordered hot-number state used to predict
 // an issue and its evaluation after the draw completes.
+// CodeSize is 6 or 7; existing rows default to 7.
 type HotNumberPrediction struct {
 	ID              uint       `json:"id" gorm:"primaryKey"`
-	LotteryTypeID   uint       `json:"lottery_type_id" gorm:"not null;uniqueIndex:idx_hot_predictions_lottery_issue;index"`
-	IssueNumber     string     `json:"issue_number" gorm:"size:64;not null;uniqueIndex:idx_hot_predictions_lottery_issue"`
+	LotteryTypeID   uint       `json:"lottery_type_id" gorm:"not null;uniqueIndex:idx_hot_predictions_lottery_issue_size;index"`
+	IssueNumber     string     `json:"issue_number" gorm:"size:64;not null;uniqueIndex:idx_hot_predictions_lottery_issue_size"`
+	CodeSize        int        `json:"code_size" gorm:"not null;default:7;uniqueIndex:idx_hot_predictions_lottery_issue_size"`
 	HotNumbers      string     `json:"hot_numbers" gorm:"type:text;not null"`
 	Prediction      string     `json:"prediction" gorm:"size:16;not null"`
 	ActualHotNumber string     `json:"actual_hot_number" gorm:"size:2"`
@@ -121,6 +123,8 @@ type BotGroupSettings struct {
 	Username    string    `json:"username" gorm:"size:128"`
 	ChatType    string    `json:"chat_type" gorm:"size:32"`
 	PushEnabled bool      `json:"push_enabled" gorm:"not null;default:false"`
+	Enable6Code bool      `json:"enable_6_code" gorm:"not null;default:false"`
+	Enable7Code bool      `json:"enable_7_code" gorm:"not null;default:false"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }

@@ -32,7 +32,7 @@ func TestHotNumbersForIssue1177SkipDuplicatesUntilSevenUnique(t *testing.T) {
 		result, _ := json.Marshal([]string{item.first})
 		records = append(records, domain.DrawRecord{IssueNumber: item.issue, DrawResult: string(result)})
 	}
-	numbers, err := hotNumbersFromRecords(records, "2609061177")
+	numbers, err := hotNumbersFromRecords(records, "2609061177", hotnumber.Size)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,5 +89,37 @@ func TestCalculateStatsIgnoresPendingPrediction(t *testing.T) {
 	stats := calculateStats(predictionsNewestFirst, 2)
 	if stats.WinRate != 50 || stats.MaxWinStreak != 1 || stats.MaxLossStreak != 1 {
 		t.Fatalf("calculateStats() included pending prediction: %+v", stats)
+	}
+}
+
+func TestHotNumbersSize6(t *testing.T) {
+	firstPlaces := []struct {
+		issue string
+		first string
+	}{
+		{"2609061176", "09"},
+		{"2609061175", "05"},
+		{"2609061174", "07"},
+		{"2609061173", "04"},
+		{"2609061172", "01"},
+		{"2609061171", "01"},
+		{"2609061170", "02"},
+		{"2609061169", "03"},
+	}
+	records := make([]domain.DrawRecord, 0, len(firstPlaces))
+	for _, item := range firstPlaces {
+		result, _ := json.Marshal([]string{item.first})
+		records = append(records, domain.DrawRecord{IssueNumber: item.issue, DrawResult: string(result)})
+	}
+	numbers, err := hotNumbersFromRecords(records, "2609061177", hotnumber.Size6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNumbers := []string{"9", "5", "7", "4", "1", "2"}
+	if !reflect.DeepEqual(numbers, wantNumbers) {
+		t.Fatalf("hot numbers size6 = %v, want %v", numbers, wantNumbers)
+	}
+	if got, want := hotnumber.Prediction(numbers), "124579"; got != want {
+		t.Fatalf("prediction = %q, want %q", got, want)
 	}
 }
