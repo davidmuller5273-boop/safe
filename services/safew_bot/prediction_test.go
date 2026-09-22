@@ -52,7 +52,7 @@ func TestRenderPredictionTablePlacesLatestIssueLast(t *testing.T) {
 		{IssueNumber: "2609051016", Prediction: "0145678", Correct: &correct},
 		{IssueNumber: "2609051015", Prediction: "0145678", Correct: &correct},
 	}
-	table := renderPredictionTable(predictionsNewestFirst)
+	table := renderPredictionTable(predictionsNewestFirst, hotnumber.Size)
 	older := strings.Index(table, "2609051015")
 	latest := strings.Index(table, "2609051017")
 	if older == -1 || latest == -1 || older >= latest {
@@ -121,5 +121,45 @@ func TestHotNumbersSize6(t *testing.T) {
 	}
 	if got, want := hotnumber.Prediction(numbers), "124579"; got != want {
 		t.Fatalf("prediction = %q, want %q", got, want)
+	}
+}
+
+
+func TestBuildPredictionMessageSize6TitleAndPrediction(t *testing.T) {
+	numbers := []string{"2", "3", "4", "5", "7", "9"}
+	pred := hotnumber.Prediction(numbers)
+	if len(pred) != 6 {
+		t.Fatalf("Prediction length = %d (%q), want 6", len(pred), pred)
+	}
+	if got, want := pred, "234579"; got != want {
+		t.Fatalf("Prediction = %q, want %q", got, want)
+	}
+	trimmed := hotnumber.TakeFirst(append(numbers, "1"), hotnumber.Size6)
+	if len(trimmed) != 6 {
+		t.Fatalf("TakeFirst size6 = %v", trimmed)
+	}
+	body := buildPredictionMessage("币安极速飞艇", hotnumber.Size6, "dummy", predictionStats{}, predictionStats{})
+	if !strings.Contains(body, "币安极速飞艇 6码热号预测") {
+		t.Fatalf("title missing 6码热号预测:\n%s", body)
+	}
+	if strings.Contains(body, "7码热号预测") {
+		t.Fatalf("size6 body unexpectedly contains 7码:\n%s", body)
+	}
+}
+
+func TestBuildPredictionMessageSize7Unchanged(t *testing.T) {
+	body := buildPredictionMessage("币安极速飞艇", hotnumber.Size, "dummy", predictionStats{}, predictionStats{})
+	if !strings.Contains(body, "币安极速飞艇 7码热号预测") {
+		t.Fatalf("title missing 7码热号预测:\n%s", body)
+	}
+}
+
+func TestRenderPredictionTableWidthMatchesSize(t *testing.T) {
+	preds := []domain.HotNumberPrediction{
+		{IssueNumber: "2609051017", Prediction: "234579", CodeSize: 6},
+	}
+	table := renderPredictionTable(preds, hotnumber.Size6)
+	if !strings.Contains(table, "234579") {
+		t.Fatalf("table missing prediction:\n%s", table)
 	}
 }

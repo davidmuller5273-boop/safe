@@ -2,6 +2,7 @@ package botperm
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/davidmuller5273-boop/safe/internal/domain"
@@ -282,6 +283,25 @@ func Effective6Code(row domain.BotGroupSettings) bool {
 	return row.Enable6Code
 }
 
+// GetGroupSettings returns persisted settings for a chat, or zero value if missing.
+func (s *Store) GetGroupSettings(chatID string) (domain.BotGroupSettings, error) {
+	chatID = strings.TrimSpace(chatID)
+	var row domain.BotGroupSettings
+	err := s.DB.Where("chat_id = ?", chatID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return domain.BotGroupSettings{ChatID: chatID}, nil
+	}
+	return row, err
+}
+
+// FormatGroupCodeState summarizes push / 6 / 7 flags and effective send modes.
+func FormatGroupCodeState(row domain.BotGroupSettings) string {
+	return fmt.Sprintf(
+		"push=%v enable_6=%v enable_7=%v（生效推送: 6码=%v 7码=%v）",
+		row.PushEnabled, row.Enable6Code, row.Enable7Code,
+		Effective6Code(row), Effective7Code(row),
+	)
+}
 
 func (s *Store) UpsertGroupMeta(chatID, title, username, chatType string) error {
 	chatID = strings.TrimSpace(chatID)

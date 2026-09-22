@@ -77,18 +77,28 @@ func isDuplicateColumn(err error) bool {
 	return strings.Contains(msg, "1060") || strings.Contains(msg, "Duplicate column")
 }
 
-// ensureHotNumberPredictionSchema adds code_size defaults and a composite unique
-// index. Index creation is done manually because GORM AutoMigrate can emit
-// Error 1061 (Duplicate key name) for multi-column uniqueIndex tags.
+// ensureHotNumberPredictionSchema adds code_size column/defaults and a composite
+// unique index (lottery_type_id, issue_number, code_size). Without code_size in
+// the unique key, size-6 and size-7 FirstOrCreate rows clobber each other.
+// Index work is manual because GORM AutoMigrate can emit Error 1061.
 func ensureHotNumberPredictionSchema(db *gorm.DB) error {
+	if !db.Migrator().HasColumn(&domain.HotNumberPrediction{}, "CodeSize") {
+		if err := db.Exec("ALTER TABLE `hot_number_predictions` ADD COLUMN `code_size` int NOT NULL DEFAULT 7").Error; err != nil {
+			if !isDuplicateColumn(err) {
+				return err
+			}
+		}
+	}
 	// Backfill code_size for rows created before the column existed.
 	if err := db.Exec("UPDATE hot_number_predictions SET code_size = 7 WHERE code_size = 0 OR code_size IS NULL").Error; err != nil {
 		return err
 	}
 	// Drop legacy unique index (lottery_type_id, issue_number) if present.
-	if db.Migrator().HasIndex(&domain.HotNumberPrediction{}, "idx_hot_predictions_lottery_issue") {
-		if err := db.Migrator().DropIndex(&domain.HotNumberPrediction{}, "idx_hot_predictions_lottery_issue"); err != nil {
-			return err
+	for _, legacy := range []string{"idx_hot_predictions_lottery_issue", "idx_lottery_type_id_issue_number"} {
+		if db.Migrator().HasIndex(&domain.HotNumberPrediction{}, legacy) {
+			if err := db.Migrator().DropIndex(&domain.HotNumberPrediction{}, legacy); err != nil {
+				return err
+			}
 		}
 	}
 	const name = "idx_hot_predictions_lottery_issue_size"

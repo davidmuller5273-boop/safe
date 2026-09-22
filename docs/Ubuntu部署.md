@@ -65,3 +65,67 @@ Nginx 参考 `deploy/nginx-safe.conf.example`。**不要**把 3306/6379/8081 暴
 - `curl -s http://127.0.0.1:8081/health`
 - 管理后台登录后配置 SafeW Token 与群 ID
 - 私聊机器人 `/whoami` 确认 developer 生效
+
+## 6. 6码 / 7码热号推送（运维核对）
+
+同一群可同时开 6码与 7码（两条独立消息）。仅 `/push on` 且两边都未显式设置时，兼容逻辑会当作 **7码**。
+
+### 更新二进制（示例：源码在 `~/safe`，运行目录 `/root/safex`）
+
+```bash
+cd ~/safe
+git pull origin main
+make build
+cp -f bin/safe /root/safex/safe
+# 按实际进程名停止后重启（systemd 或手动均可）
+pkill -f 'safe admin' || true
+pkill -f 'safe lottery-collector' || true
+pkill -f 'safe safew-bot' || true
+cd /root/safex
+nohup ./safe admin > admin.log 2>&1 &
+nohup ./safe lottery-collector > lottery-collector.log 2>&1 &
+nohup ./safe safew-bot > safew-bot.log 2>&1 &
+# 若使用 systemd：
+# sudo systemctl restart safe-admin safe-lottery-collector safe-safew-bot
+```
+
+启动时 `database.Open` 会自动补 `enable_6_code` / `enable_7_code` 列，并把 `hot_number_predictions` 唯一索引升级为 `(lottery_type_id, issue_number, code_size)`。
+
+### 数据库自检
+
+```sql
+SELECT chat_id, push_enabled, enable_6_code, enable_7_code FROM bot_group_settings;
+SHOW INDEX FROM hot_number_predictions;
+-- 期望存在 UNIQUE：idx_hot_predictions_lottery_issue_size (lottery_type_id, issue_number, code_size)
+-- 不应再有仅 (lottery_type_id, issue_number) 的旧唯一索引 idx_hot_predictions_lottery_issue
+```
+
+若迁移早已跑过但索引仍不对，可手工执行（注意先备份）：
+
+```sql
+ALTER TABLE hot_number_predictions ADD COLUMN IF NOT EXISTS code_size INT NOT NULL DEFAULT 7;
+UPDATE hot_number_predictions SET code_size = 7 WHERE code_size = 0 OR code_size IS NULL;
+-- 有旧唯一索引时再 DROP：
+-- ALTER TABLE hot_number_predictions DROP INDEX idx_hot_predictions_lottery_issue;
+ALTER TABLE hot_number_predictions
+  ADD UNIQUE KEY idx_hot_predictions_lottery_issue_size (lottery_type_id, issue_number, code_size);
+ALTER TABLE bot_group_settings
+  ADD COLUMN IF NOT EXISTS enable_6_code TINYINT(1) NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS enable_7_code TINYINT(1) NOT NULL DEFAULT 0;
+```
+
+### 机器人命令（只要 6码）
+
+```text
+/关闭7码
+/开启6码
+/push on
+/pushstatus
+```
+
+`/开启6码`、`/push`、`/pushstatus`、`/whoami` 会回复当前 `push / enable_6 / enable_7` 与**生效**推送模式。
+
+### 验证
+
+下一期推送标题应为 `{彩种名} 6码热号预测`，预测列应为 **6 位**热号（如 `234579`），而不是 7 位。
+若仍看到 `7码热号预测`，先查 `/pushstatus`：可能仍是兼容默认 7码，或 7码也开着（会发两条）。

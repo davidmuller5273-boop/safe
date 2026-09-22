@@ -200,9 +200,17 @@ func (w worker) renderPredictionHistory(lotteryTypeID uint, lotteryName string, 
 	if len(tablePredictions) > 20 {
 		tablePredictions = tablePredictions[:20]
 	}
-	table := renderPredictionTable(tablePredictions)
+	table := renderPredictionTable(tablePredictions, size)
 	stats30 := calculateStats(predictions, 30)
 	stats180 := calculateStats(predictions, 180)
+	return buildPredictionMessage(lotteryName, size, table, stats30, stats180), nil
+}
+
+// buildPredictionMessage formats the outbound prediction body for a given code size.
+func buildPredictionMessage(lotteryName string, size int, table string, stats30, stats180 predictionStats) string {
+	if size <= 0 {
+		size = hotnumber.Size
+	}
 	return fmt.Sprintf(
 		"<b>%s %d码热号预测</b>\n<pre>%s</pre>\n\n--------------------\n<b>📊 周期胜率概览</b>\n30期：%.1f%%｜180期：%.1f%%\n近三小时最大连错：%d期❌\n近三小时最大连中：%d期✅",
 		html.EscapeString(lotteryName),
@@ -212,7 +220,7 @@ func (w worker) renderPredictionHistory(lotteryTypeID uint, lotteryName string, 
 		stats180.WinRate,
 		stats180.MaxLossStreak,
 		stats180.MaxWinStreak,
-	), nil
+	)
 }
 
 type predictionStats struct {
@@ -258,7 +266,11 @@ func calculateStats(predictions []domain.HotNumberPrediction, limit int) predict
 
 // renderPredictionTable receives predictions queried newest-first and renders
 // them oldest-first so the latest issue is always the final row.
-func renderPredictionTable(predictions []domain.HotNumberPrediction) string {
+// predWidth should match code size (6 or 7) so the prediction column aligns.
+func renderPredictionTable(predictions []domain.HotNumberPrediction, predWidth int) string {
+	if predWidth <= 0 {
+		predWidth = hotnumber.Size
+	}
 	var table strings.Builder
 	table.WriteString("期号          预测热号(冠军)  结果\n")
 	for i := len(predictions) - 1; i >= 0; i-- {
@@ -268,7 +280,7 @@ func renderPredictionTable(predictions []domain.HotNumberPrediction) string {
 		} else if predictions[i].Correct != nil {
 			status = "❌"
 		}
-		fmt.Fprintf(&table, "%-10s    %-7s      %s\n\n", predictions[i].IssueNumber, predictions[i].Prediction, status)
+		fmt.Fprintf(&table, "%-10s    %-*s      %s\n\n", predictions[i].IssueNumber, predWidth, predictions[i].Prediction, status)
 	}
 	return strings.TrimRight(table.String(), "\n")
 }

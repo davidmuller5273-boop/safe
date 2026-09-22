@@ -149,21 +149,17 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 	case "/help", "/start":
 		return w.replyPlain(ctx, botConfig.Token, chatID, helpForRole(role))
 	case "/whoami":
-		pushOn, _ := w.perms.IsPushEnabled(chatID)
+		settings, _ := w.perms.GetGroupSettings(chatID)
 		return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(
-			"user_id=%s\nchat_id=%s\n角色=%s (%s)\n本群推送=%v",
-			userID, chatID, botperm.RoleLabel(role), roleOrNone(role), pushOn,
+			"user_id=%s\nchat_id=%s\n角色=%s (%s)\n%s",
+			userID, chatID, botperm.RoleLabel(role), roleOrNone(role), botperm.FormatGroupCodeState(settings),
 		))
 	case "/pushstatus":
-		pushOn, err := w.perms.IsPushEnabled(chatID)
+		settings, err := w.perms.GetGroupSettings(chatID)
 		if err != nil {
 			return err
 		}
-		state := "关闭（默认）"
-		if pushOn {
-			state = "已开启"
-		}
-		return w.replyPlain(ctx, botConfig.Token, chatID, "本群推送："+state)
+		return w.replyPlain(ctx, botConfig.Token, chatID, "本群推送状态：\n"+botperm.FormatGroupCodeState(settings))
 	case "/push":
 		ok, err := w.perms.CanTogglePush(userID)
 		if err != nil {
@@ -190,10 +186,15 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 		if err := w.perms.SetPushEnabled(targetChat, enabled); err != nil {
 			return err
 		}
-		if enabled {
-			return w.replyPlain(ctx, botConfig.Token, chatID, "已开启推送: "+targetChat)
+		settings, err := w.perms.GetGroupSettings(targetChat)
+		if err != nil {
+			return err
 		}
-		return w.replyPlain(ctx, botConfig.Token, chatID, "已关闭推送: "+targetChat)
+		action = "已关闭推送"
+		if enabled {
+			action = "已开启推送"
+		}
+		return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf("%s: %s\n%s", action, targetChat, botperm.FormatGroupCodeState(settings)))
 	case "/开启6码":
 		return w.cmdSetCodeMode(ctx, botConfig, userID, chatID, 6, true)
 	case "/关闭6码":
@@ -418,11 +419,18 @@ func (w worker) cmdSetCodeMode(ctx context.Context, botConfig systemconfig.SafeW
 	if err := w.perms.SetCodeMode(chatID, size, enabled); err != nil {
 		return err
 	}
+	settings, err := w.perms.GetGroupSettings(chatID)
+	if err != nil {
+		return err
+	}
 	action := "已关闭"
 	if enabled {
 		action = "已开启"
 	}
-	return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf("%s %d码预测: %s", action, size, chatID))
+	return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(
+		"%s %d码预测: %s\n%s",
+		action, size, chatID, botperm.FormatGroupCodeState(settings),
+	))
 }
 
 func (w worker) cmdChineseAd(ctx context.Context, botConfig systemconfig.SafeW, userID, chatID, args string, isPrefix bool) error {
