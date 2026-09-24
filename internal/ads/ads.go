@@ -43,15 +43,49 @@ func LoadForChat(db *gorm.DB, chatID string) (Settings, error) {
 	if chatID != "" {
 		var group domain.BotGroupAd
 		err := db.Where("chat_id = ?", chatID).First(&group).Error
-		if err == nil {
-			// Group row present: use its values as-is (empty means no ad for that side).
-			return Settings{PrefixAd: group.PrefixAd, SuffixAd: group.SuffixAd, Scope: "group", ChatID: chatID}, nil
-		}
-		if err != gorm.ErrRecordNotFound {
+		if err != nil && err != gorm.ErrRecordNotFound {
 			return Settings{}, err
+		}
+		if err == nil && (strings.TrimSpace(group.PrefixAd) != "" || strings.TrimSpace(group.SuffixAd) != "") {
+			// Per side: the group value wins; an empty side falls back to the global ad,
+			// so setting only a group prefix keeps the global suffix (and vice versa).
+			global, gerr := LoadGlobal(db)
+			if gerr != nil {
+				return Settings{}, gerr
+			}
+			return mergeSides(group.PrefixAd, group.SuffixAd, global, chatID), nil
 		}
 	}
 	return LoadGlobal(db)
+}
+
+func mergeSides(groupPrefix, groupSuffix string, global Settings, chatID string) Settings {
+	s := Settings{PrefixAd: global.PrefixAd, SuffixAd: global.SuffixAd, Scope: "group", ChatID: chatID}
+	if strings.TrimSpace(groupPrefix) != "" {
+		s.PrefixAd = groupPrefix
+	}
+	if strings.TrimSpace(groupSuffix) != "" {
+		s.SuffixAd = groupSuffix
+	}
+	return s
+}
+
+// SplitPrefixSuffix parses "前广告 | 后广告" or a multi-line form where a line
+// containing only "---" or "|" separates the two sides. ok is false when no separator is found.
+func SplitPrefixSuffix(text string) (prefix, suffix string, ok bool) {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	for i, line := range lines {
+		t := strings.TrimSpace(line)
+		if t == "---" || t == "|" || t == "｜" {
+			return strings.TrimSpace(strings.Join(lines[:i], "\n")), strings.TrimSpace(strings.Join(lines[i+1:], "\n")), true
+		}
+	}
+	for _, sep := range []string{"|", "｜"} {
+		if idx := strings.Index(text, sep); idx >= 0 {
+			return strings.TrimSpace(text[:idx]), strings.TrimSpace(text[idx+len(sep):]), true
+		}
+	}
+	return "", "", false
 }
 
 func LoadGlobal(db *gorm.DB) (Settings, error) {

@@ -23,6 +23,7 @@ func helpForRole(role string) string {
 广告（本群）：
 /广告前 <文本> — 设置本群前广告（空文本则清空）
 /广告后 <文本> — 设置本群后广告（空文本则清空）
+/广告前后 <前广告> | <后广告> — 一次同时设置前后广告（也可换行用 --- 分隔）
 /setprefix [group] <文本>
 /setsuffix [group] <文本>
 /clearprefix [group]
@@ -209,6 +210,8 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 		return w.cmdChineseAd(ctx, botConfig, userID, chatID, args, true)
 	case "/广告后":
 		return w.cmdChineseAd(ctx, botConfig, userID, chatID, args, false)
+	case "/广告前后", "/广告":
+		return w.cmdChineseAdBoth(ctx, botConfig, userID, chatID, args)
 	case "/adstatus":
 		ok, err := w.perms.CanControlSensitive(userID, chatID)
 		if err != nil {
@@ -477,6 +480,30 @@ func (w worker) cmdChineseAd(ctx context.Context, botConfig systemconfig.SafeW, 
 		return w.replyPlain(ctx, botConfig.Token, chatID, "已清空本群"+which)
 	}
 	return w.replyPlain(ctx, botConfig.Token, chatID, "已更新本群"+which)
+}
+
+func (w worker) cmdChineseAdBoth(ctx context.Context, botConfig systemconfig.SafeW, userID, chatID, args string) error {
+	ok, err := w.perms.CanControlSensitive(userID, chatID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return w.replyPlain(ctx, botConfig.Token, chatID, "权限不足")
+	}
+	prefix, suffix, found := ads.SplitPrefixSuffix(strings.TrimSpace(args))
+	if !found {
+		return w.replyPlain(ctx, botConfig.Token, chatID, "用法: /广告前后 前广告内容 | 后广告内容\n（也可以换行，中间单独一行写 --- 分隔；某一侧留空表示清空）")
+	}
+	if err := ads.SaveGroup(w.db, chatID, &prefix, &suffix); err != nil {
+		return err
+	}
+	show := func(v string) string {
+		if v == "" {
+			return "（空，用全局）"
+		}
+		return v
+	}
+	return w.replyPlain(ctx, botConfig.Token, chatID, "已同时更新本群广告\n前广告：\n"+show(prefix)+"\n\n后广告：\n"+show(suffix))
 }
 
 func (w worker) cmdSetAd(ctx context.Context, botConfig systemconfig.SafeW, userID, chatID, args string, isPrefix bool) error {
