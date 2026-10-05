@@ -136,3 +136,30 @@ ALTER TABLE bot_group_settings
 
 下一期冠军推送标题应为 `{彩种名} 6码热号预测`；亚军推送标题应为 `{彩种名} 亚军7码热号预测`。
 若开启亚军后仍无亚军消息，确认已更新到含亚军逻辑的二进制，且群 `push=on` 且对应 `enable_runner_up_*` 为 true。
+
+## 7. 开奖播报 / 按钮菜单 / 自动置顶（升级说明）
+
+**升级只需标准流程，无需手工 SQL**：`git pull` → `make build` → 复制二进制 → 重启 `admin`、`lottery-collector`、`safew-bot` 三个进程（不新增进程）。
+
+- 启动时自动 `CREATE TABLE IF NOT EXISTS`：`lottery_broadcast_results`、`lottery_broadcast_subscriptions`、`lottery_broadcast_source_status`、`lottery_broadcast_outbox`（不走 AutoMigrate，不会重复建索引；建表失败只记日志，不影响其他功能）。
+- 开关存于 `system_configs`：`lottery_query_enabled`、`lottery_broadcast_enabled`、`lottery_broadcast_with_ads`、`lottery_broadcast_games`，**缺省即全部开启**。
+- 轮询与发送在 `safew-bot` 进程内（它持有机器人 Token）：每 5 秒轮询，新一期出现且开关为开时入队，3 秒内发送并 `pinChatMessage` 置顶。
+- **自动置顶要求机器人是群管理员并有「置顶消息」权限**；无权限时仍发送，只是不置顶（`safew-bot` 日志与后台「最近播报」可见）。
+- 服务器需能访问外网数据源（福彩 cwl.gov.cn、体彩 sporttery.cn、api.api16868.com、raw.githubusercontent.com、香港赛马会、marksix6 / macaujc 等）。可选环境变量覆盖（一般不用设）：
+
+```bash
+# CWL_LOTTERY_URL=...
+# SPORTTERY_LOTTERY_URL=...
+# LOTTERY_REALTIME_URL=https://api.api16868.com
+# LOTTERY_PUBLIC_DATA_BASE_URL=https://raw.githubusercontent.com/wenjinliuu/lottery-data-repo/main/public_data
+```
+
+- 后台页面：不重建前端即可访问 `https://你的域名/admin/lottery-broadcast/ui`（经 nginx `/admin/` 代理到 8081，后台账号登录，需 `lottery:manage` 权限）。重建前端（`cd chatadmin && npm install && npm run build`）后，「彩票管理」菜单下也会出现「开奖播报」。
+
+### 自检
+
+```sql
+SHOW TABLES LIKE 'lottery_broadcast_%';
+SELECT chat_id, selector FROM lottery_broadcast_subscriptions;
+SELECT chat_id, game_code, issue, status, pinned, last_error FROM lottery_broadcast_outbox ORDER BY id DESC LIMIT 20;
+```
