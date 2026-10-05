@@ -2,11 +2,11 @@ package http
 
 import (
 	"errors"
-	"github.com/gin-gonic/gin"
 	"github.com/davidmuller5273-boop/safe/internal/domain"
 	"github.com/davidmuller5273-boop/safe/internal/middleware"
 	"github.com/davidmuller5273-boop/safe/internal/service"
 	"github.com/davidmuller5273-boop/safe/internal/systemconfig"
+	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 	"net/http"
@@ -24,6 +24,7 @@ func Router(db *gorm.DB, auth service.Auth) *gin.Engine {
 	h := Handler{DB: db, Auth: auth}
 	r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok", "service": "admin"}) })
 	r.POST("/admin/login", h.login)
+	r.GET("/admin/lottery-broadcast/ui", h.lotteryBroadcastUI) // static page; data APIs below require login
 	g := r.Group("/admin", middleware.Auth(auth))
 	g.GET("/current", h.current)
 	g.POST("/logout", func(c *gin.Context) { ok(c, nil) })
@@ -44,6 +45,9 @@ func Router(db *gorm.DB, auth service.Auth) *gin.Engine {
 	g.PUT("/lottery-types/:id", middleware.Require(db, "lottery:manage"), h.updateLotteryType)
 	g.DELETE("/lottery-types/:id", middleware.Require(db, "lottery:manage"), h.deleteLotteryType)
 	g.GET("/draw-records", middleware.Require(db, "lottery:manage"), h.drawRecords)
+	g.GET("/lottery-broadcast", middleware.Require(db, "lottery:manage"), h.lotteryBroadcast)
+	g.PUT("/lottery-broadcast/switches", middleware.Require(db, "lottery:manage"), h.updateLotteryBroadcastSwitches)
+	g.DELETE("/lottery-broadcast/subscriptions", middleware.Require(db, "lottery:manage"), h.deleteLotteryBroadcastSubscription)
 	return r
 }
 func ok(c *gin.Context, data any) {

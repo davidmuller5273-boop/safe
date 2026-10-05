@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>开奖播报 - 管理后台</title>
+<style>
+body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;margin:0;background:#f5f7fa;color:#303133}
+header{background:#304156;color:#fff;padding:12px 20px;display:flex;justify-content:space-between;align-items:center}
+header a{color:#bfcbd9;margin-left:12px;cursor:pointer}
+main{max-width:1100px;margin:16px auto;padding:0 12px}
+.card{background:#fff;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.08);padding:16px;margin-bottom:16px}
+h2{font-size:16px;margin:0 0 12px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{border-bottom:1px solid #ebeef5;padding:6px 8px;text-align:left;vertical-align:top}
+th{background:#fafafa}
+.sw{display:inline-flex;align-items:center;gap:6px;margin:4px 16px 4px 0;cursor:pointer;user-select:none}
+.tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:12px}
+.ok{background:#f0f9eb;color:#67c23a}.bad{background:#fef0f0;color:#f56c6c}.wait{background:#fdf6ec;color:#e6a23c}
+button{background:#409eff;color:#fff;border:0;border-radius:4px;padding:5px 12px;cursor:pointer}
+button.danger{background:#f56c6c}
+input{padding:6px 8px;border:1px solid #dcdfe6;border-radius:4px;margin:4px 0;width:220px}
+.muted{color:#909399;font-size:12px}
+#login{max-width:320px;margin:80px auto}
+</style>
+</head>
+<body>
+<header><b>🎟 开奖播报</b><span><span id="who" class="muted"></span><a onclick="load()">刷新</a><a onclick="logout()">退出</a></span></header>
+<div id="login" class="card" style="display:none">
+  <h2>管理员登录</h2>
+  <div><input id="u" placeholder="用户名"></div>
+  <div><input id="p" type="password" placeholder="密码" onkeydown="if(event.key==='Enter')login()"></div>
+  <button onclick="login()">登录</button> <span id="lerr" class="muted"></span>
+</div>
+<main id="app" style="display:none">
+  <div class="card">
+    <h2>总开关</h2>
+    <label class="sw"><input type="checkbox" id="query_enabled" onchange="saveFlag(this)"> 启用开奖查询与轮询</label>
+    <label class="sw"><input type="checkbox" id="broadcast_enabled" onchange="saveFlag(this)"> 新期开奖自动播报（并置顶）</label>
+    <label class="sw"><input type="checkbox" id="with_ads" onchange="saveFlag(this)"> 播报附带本群前后广告</label>
+    <div class="muted">每 5 秒轮询，开奖前 2 分钟至开奖后 45 分钟为密集窗口；只有出现新一期且该彩种开关为开时，才推送给已订阅的群（约 3 秒内送达并自动置顶，机器人需为群管理员并有置顶权限）。</div>
+  </div>
+  <div class="card">
+    <h2>彩种播报开关</h2>
+    <div id="games"></div>
+  </div>
+  <div class="card">
+    <h2>最新开奖</h2>
+    <table><thead><tr><th>彩种</th><th>期号</th><th>开奖时间</th><th>号码</th><th>数据源</th><th>抓取时间</th></tr></thead><tbody id="latest"></tbody></table>
+  </div>
+  <div class="card">
+    <h2>群订阅（<span id="subcount">0</span>）</h2>
+    <table><thead><tr><th>群</th><th>群ID</th><th>订阅范围</th><th>订阅人</th><th>时间</th><th></th></tr></thead><tbody id="subs"></tbody></table>
+    <div class="muted">群内由群管理员/超级管理员发送 /订阅开奖 或点 /菜单 按钮订阅。</div>
+  </div>
+  <div class="card">
+    <h2>数据源状态</h2>
+    <table><thead><tr><th>数据源</th><th>最近检查</th><th>最近成功</th><th>错误</th></tr></thead><tbody id="sources"></tbody></table>
+  </div>
+  <div class="card">
+    <h2>最近播报</h2>
+    <table><thead><tr><th>时间</th><th>群ID</th><th>彩种</th><th>期号</th><th>状态</th><th>置顶</th><th>备注</th></tr></thead><tbody id="outbox"></tbody></table>
+  </div>
+</main>
+<script>
+const base = location.pathname.replace(/\/lottery-broadcast\/ui\/?$/, '');
+let token = localStorage.getItem('admin_token') || '';
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function fmt(t){if(!t)return '';const d=new Date(t);return isNaN(d)?esc(t):d.toLocaleString('zh-CN',{hour12:false})}
+async function api(method, path, body){
+  const r = await fetch(base+path,{method,headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:body?JSON.stringify(body):undefined});
+  const j = await r.json().catch(()=>({message:r.statusText}));
+  if(r.status===401){showLogin();throw new Error(j.message||'请先登录')}
+  if(!r.ok||(j.code&&j.code!==200))throw new Error(j.message||r.statusText);
+  return j.data;
+}
+function showLogin(){document.getElementById('login').style.display='';document.getElementById('app').style.display='none'}
+async function login(){
+  const r = await fetch(base+'/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u.value,password:p.value})});
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok||!j.data){document.getElementById('lerr').textContent=j.message||'登录失败';return}
+  token=j.data.token;localStorage.setItem('admin_token',token);load();
+}
+function logout(){localStorage.removeItem('admin_token');token='';showLogin()}
+async function load(){
+  if(!token){showLogin();return}
+  let d;
+  try{d=await api('GET','/lottery-broadcast')}catch(e){if(token)alert(e.message);return}
+  document.getElementById('login').style.display='none';document.getElementById('app').style.display='';
+  for(const k of ['query_enabled','broadcast_enabled','with_ads'])document.getElementById(k).checked=!!d[k];
+  document.getElementById('games').innerHTML=d.games.map(g=>`<label class="sw"><input type="checkbox" data-code="${esc(g.code)}" ${g.enabled?'checked':''} onchange="saveGame(this)"> ${esc(g.name)} <span class="muted">${esc(g.source)}</span></label>`).join('');
+  document.getElementById('latest').innerHTML=d.latest.map(r=>`<tr><td>${esc(r.game_name)}</td><td>${esc(r.issue)}</td><td>${esc(r.draw_time)}</td><td>${esc(r.numbers)}</td><td>${esc(r.source)}</td><td>${fmt(r.fetched_at)}</td></tr>`).join('')||'<tr><td colspan="6" class="muted">暂无（有群订阅后开始轮询）</td></tr>';
+  document.getElementById('subcount').textContent=d.subscriptions.length;
+  document.getElementById('subs').innerHTML=d.subscriptions.map(s=>`<tr><td>${esc(s.group_title||'(无标题)')}</td><td>${esc(s.chat_id)}</td><td>${esc(s.label)}</td><td>${esc(s.created_by)}</td><td>${fmt(s.created_at)}</td><td><button class="danger" onclick="delSub('${esc(s.chat_id)}','${esc(s.selector)}')">删除</button></td></tr>`).join('')||'<tr><td colspan="6" class="muted">暂无订阅</td></tr>';
+  document.getElementById('sources').innerHTML=d.sources.map(s=>`<tr><td>${esc(s.label)}</td><td>${fmt(s.last_checked_at)}</td><td>${fmt(s.last_success_at)}</td><td>${s.last_error?'<span class="tag bad">'+esc(s.last_error)+'</span>':'<span class="tag ok">正常</span>'}</td></tr>`).join('')||'<tr><td colspan="4" class="muted">暂无</td></tr>';
+  const st={sent:'<span class="tag ok">已发送</span>',pending:'<span class="tag wait">待发送</span>',failed:'<span class="tag bad">失败</span>'};
+  document.getElementById('outbox').innerHTML=d.outbox.map(o=>`<tr><td>${fmt(o.created_at)}</td><td>${esc(o.chat_id)}</td><td>${esc(o.game_name||o.game_code)}</td><td>${esc(o.issue)}</td><td>${st[o.status]||esc(o.status)}</td><td>${o.pinned?'✅':'—'}</td><td class="muted">${esc(o.last_error)}</td></tr>`).join('')||'<tr><td colspan="7" class="muted">暂无</td></tr>';
+}
+async function saveFlag(el){try{await api('PUT','/lottery-broadcast/switches',{[el.id]:el.checked})}catch(e){alert(e.message);el.checked=!el.checked}}
+async function saveGame(el){try{await api('PUT','/lottery-broadcast/switches',{games:{[el.dataset.code]:el.checked}})}catch(e){alert(e.message);el.checked=!el.checked}}
+async function delSub(chat,selector){if(!confirm('确定删除该群的这条订阅？'))return;try{await api('DELETE','/lottery-broadcast/subscriptions',{chat_id:chat,selector});load()}catch(e){alert(e.message)}}
+load();
+</script>
+</body>
+</html>
