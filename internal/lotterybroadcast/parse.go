@@ -440,3 +440,45 @@ func ParseHuiniao(game Game, payload any) (Result, error) {
 		DetailURL: HuiniaoURL, NextDrawTime: str(row["next_open_time"])}
 	return normalizeIfStrict(r)
 }
+
+// ParseHuiniaoHistory parses 慧鸟 lotteryHistory?limit=N (data.data.list); bad rows are skipped.
+func ParseHuiniaoHistory(game Game, payload any) []Result {
+	var out []Result
+	for _, item := range asList(asMap(asMap(asMap(payload)["data"])["data"])["list"]) {
+		row := asMap(item)
+		if row == nil {
+			continue
+		}
+		r, err := ParseHuiniao(game, map[string]any{"data": map[string]any{"last": row}})
+		if err != nil {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// ParseRealtimeHistory parses api16868 getHistoryLotteryInfo.do (result.data list); bad rows are skipped.
+func ParseRealtimeHistory(game Game, payload any, detailURL string) ([]Result, error) {
+	m := asMap(payload)
+	if code, err := toInt(m["errorCode"]); err != nil || code != 0 {
+		msg := str(m["message"])
+		if msg == "" {
+			msg = "接口返回错误"
+		}
+		return nil, errors.New(msg)
+	}
+	var out []Result
+	for _, item := range asList(asMap(m["result"])["data"]) {
+		row := asMap(item)
+		if row == nil {
+			continue
+		}
+		r, err := ParseRealtime(game, map[string]any{"errorCode": json.Number("0"), "result": map[string]any{"data": row}}, detailURL)
+		if err != nil {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}

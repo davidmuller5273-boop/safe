@@ -17,22 +17,25 @@ import (
 )
 
 const (
-	lotteryPollInterval   = 5 * time.Second  // Python: run_repeating(poll_lottery_results, interval=5)
-	lotterySendInterval   = 3 * time.Second  // Python: outbox processed every 3s
-	lotterySendBatch      = 15               // Python: pending_outbox(15)
-	lotteryMaxAttempts    = 3                // give up on a chat after 3 failed sends
-	lotteryOutboxMaxAge   = 6 * time.Hour    // stale broadcasts (e.g. bot was down) are dropped
-	lotteryQueryThrottle  = 20 * time.Second // per-game refresh throttle for /开奖 queries
-	lotteryMessageMaxRune = 3500
+	lotteryPollInterval     = 5 * time.Second  // Python: run_repeating(poll_lottery_results, interval=5)
+	lotterySendInterval     = 3 * time.Second  // Python: outbox processed every 3s
+	lotterySendBatch        = 15               // Python: pending_outbox(15)
+	lotteryMaxAttempts      = 3                // give up on a chat after 3 failed sends
+	lotteryOutboxMaxAge     = 6 * time.Hour    // stale broadcasts (e.g. bot was down) are dropped
+	lotteryQueryThrottle    = 20 * time.Second // per-game refresh throttle for /开奖 queries
+	lotteryMessageMaxRune   = 3500
+	lotteryBackfillInterval = 3 * time.Hour    // periodic history cache top-up
+	lotteryOnDemandTimeout  = 35 * time.Second // wait this long before 「正在加载历史」
 )
 
 // lotteryRuntime holds the 开奖播报 state that lives inside safew-bot (it owns
 // the bot token, so polling + sending + pinning happen in the same process).
 type lotteryRuntime struct {
-	store   *lotterybroadcast.Store
-	service *lotterybroadcast.Service
-	poller  *lotterybroadcast.Poller
-	nudge   chan struct{}
+	store      *lotterybroadcast.Store
+	service    *lotterybroadcast.Service
+	poller     *lotterybroadcast.Poller
+	backfiller *lotterybroadcast.Backfiller
+	nudge      chan struct{}
 
 	mu        sync.Mutex
 	lastQuery map[string]time.Time
@@ -45,6 +48,14 @@ func newLotteryRuntime(store *lotterybroadcast.Store, service *lotterybroadcast.
 		Fetcher:  service,
 		Switches: store.LoadSwitches,
 		OnQueued: func(int) { rt.wake() },
+	}
+	rt.backfiller = &lotterybroadcast.Backfiller{
+		Store:         store,
+		Fetcher:       service,
+		Interval:      lotteryBackfillInterval,
+		RetryInterval: 15 * time.Minute,
+		GameTimeout:   45 * time.Second,
+		Concurrency:   3,
 	}
 	return rt
 }
@@ -90,6 +101,16 @@ func (w worker) runLotteryPoller(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// runLotteryBackfiller fills each game's history cache (最近100期) on startup
+// and every few hours. Failures are logged once per cycle and never block polling.
+func (w worker) runLotteryBackfiller(ctx context.Context) error {
+	if w.lb == nil || w.lb.backfiller == nil {
+		return nil
+	}
+	w.lb.backfiller.Run(ctx)
+	return nil
 }
 
 // runLotterySender delivers queued broadcasts every 3s (or immediately when the
@@ -245,18 +266,6 @@ func (w worker) refreshForQuery(ctx context.Context, codes []string, sw lotteryb
 	return out.Errors
 }
 
-func firstError(errs map[string]string) string {
-	for _, code := range lotterybroadcast.GameOrder {
-		if e, ok := errs[code]; ok {
-			return e
-		}
-	}
-	for _, e := range errs {
-		return e
-	}
-	return "数据源尚未初始化"
-}
-
 // chunkText splits blocks into messages under the SafeW length limit.
 func chunkText(blocks []string, sep string, max int) []string {
 	var out []string
@@ -286,6 +295,8 @@ func (w worker) lotteryCodesForChat(chatID string) []string {
 }
 
 // lotteryQuery implements /lottery /开奖 [彩种] (anyone).
+// Reads the DB cache first so replies are instant; refreshes in the background
+// when cache already has data. Empty cache triggers an on-demand backfill.
 func (w worker) lotteryQuery(ctx context.Context, token string, chat safew.Chat, raw string) error {
 	chatID := chat.IDString()
 	sw := w.lotterySwitches()
@@ -303,13 +314,33 @@ func (w worker) lotteryQuery(ctx context.Context, token string, chat safew.Chat,
 		}
 		codes = lotterybroadcast.CodesForSelector(selector)
 	}
-	errs := w.refreshForQuery(ctx, codes, sw, true)
 	rows, err := w.lb.store.LatestResults(codes)
 	if err != nil {
 		return err
 	}
-	if len(rows) == 0 {
-		return w.replyPlain(ctx, token, chatID, html.EscapeString("暂时无法取得开奖结果："+firstError(errs)))
+	var errs map[string]string
+	if len(rows) > 0 {
+		// Instant reply from cache; refresh newest in background (may broadcast).
+		go w.refreshForQuery(context.WithoutCancel(ctx), codes, sw, true)
+	} else {
+		note, berr := w.ensureHistoryCache(ctx, codes)
+		rows, err = w.lb.store.LatestResults(codes)
+		if err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			if berr != nil {
+				return w.replyPlain(ctx, token, chatID, html.EscapeString(lotterybroadcast.ErrBackfillSlow.Error()))
+			}
+			msg := "暂时无法取得开奖结果"
+			if note != "" {
+				msg += "：" + note
+			}
+			return w.replyPlain(ctx, token, chatID, html.EscapeString(msg))
+		}
+		if note != "" {
+			errs = map[string]string{"backfill": note}
+		}
 	}
 	blocks := make([]string, 0, len(rows)+1)
 	for _, row := range rows {
@@ -327,7 +358,7 @@ func (w worker) lotteryQuery(ctx context.Context, token string, chat safew.Chat,
 }
 
 // lotteryKeyword implements the group keyword 「开奖」: only for groups with
-// subscriptions; replies with the subscribed games' latest results, no broadcast.
+// subscriptions; replies with the subscribed games' latest results from cache.
 func (w worker) lotteryKeyword(ctx context.Context, token string, chat safew.Chat) error {
 	chatID := chat.IDString()
 	codes, err := w.lb.store.SubscribedCodesForChat(chatID)
@@ -338,15 +369,27 @@ func (w worker) lotteryKeyword(ctx context.Context, token string, chat safew.Cha
 	if !sw.QueryEnabled {
 		return nil
 	}
-	// Python refreshes without broadcasting here; we allow it so a draw first
-	// seen via this keyword is still broadcast to subscribers (never twice).
-	errs := w.refreshForQuery(ctx, codes, sw, true)
 	rows, err := w.lb.store.LatestResults(codes)
 	if err != nil {
 		return err
 	}
-	if len(rows) == 0 {
-		return w.replyPlain(ctx, token, chatID, html.EscapeString("暂时无法取得已开启彩种的开奖结果："+firstError(errs)))
+	if len(rows) > 0 {
+		go w.refreshForQuery(context.WithoutCancel(ctx), codes, sw, true)
+	} else {
+		note, berr := w.ensureHistoryCache(ctx, codes)
+		rows, err = w.lb.store.LatestResults(codes)
+		if err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			if berr != nil {
+				return w.replyPlain(ctx, token, chatID, html.EscapeString(lotterybroadcast.ErrBackfillSlow.Error()))
+			}
+			if note == "" {
+				note = "数据源尚未初始化"
+			}
+			return w.replyPlain(ctx, token, chatID, html.EscapeString("暂时无法取得已开启彩种的开奖结果："+note))
+		}
 	}
 	blocks := make([]string, 0, len(rows))
 	for i, row := range rows {
@@ -391,6 +434,7 @@ func (w worker) storedHistory(code string) ([]lotterybroadcast.Result, error) {
 }
 
 // lotteryHistory implements /lotteryhistory /开奖历史 彩种 (anyone).
+// Serves the DB cache first; when empty, backfills on demand (never silent).
 func (w worker) lotteryHistory(ctx context.Context, token string, chat safew.Chat, raw string) error {
 	chatID := chat.IDString()
 	code := lotterybroadcast.ResolveCode(raw)
@@ -401,42 +445,24 @@ func (w worker) lotteryHistory(ctx context.Context, token string, chat safew.Cha
 	if !sw.QueryEnabled {
 		return w.replyPlain(ctx, token, chatID, "开奖结果查询目前已关闭。")
 	}
-	source := lotterybroadcast.Games[code].Source
-	fetchErr := ""
-	hctx, cancel := context.WithTimeout(ctx, 40*time.Second)
-	results, err := w.lb.service.History(hctx, code, 100)
-	cancel()
-	if err != nil {
-		fetchErr = err.Error()
-		_ = w.lb.store.SetSourceStatus(source, false, fetchErr)
-	} else {
-		// History is saved without broadcasting (same as Python send_lottery_history).
-		// Rows newer than the stored latest issue are skipped so a history query
-		// can never swallow a fresh draw before the poller broadcasts it.
-		known, err := w.lb.store.LatestIssue(code)
-		if err != nil {
-			return err
-		}
-		for _, r := range results {
-			if known != "" && lotterybroadcast.IsNewerIssue(r.Issue, known) {
-				continue
-			}
-			if !lotterybroadcast.IsValidResult(r) {
-				continue
-			}
-			nr, nerr := lotterybroadcast.NormalizeResult(r)
-			if nerr != nil {
-				continue
-			}
-			if _, err := w.lb.store.SaveResult(nr); err != nil {
-				return err
-			}
-		}
-		_ = w.lb.store.SetSourceStatus(source, true, "")
-	}
 	rows, err := w.storedHistory(code)
 	if err != nil {
 		return err
+	}
+	fetchErr := ""
+	if len(rows) == 0 {
+		note, berr := w.ensureHistoryCache(ctx, []string{code})
+		fetchErr = note
+		rows, err = w.storedHistory(code)
+		if err != nil {
+			return err
+		}
+		if len(rows) == 0 && berr != nil {
+			return w.replyPlain(ctx, token, chatID, html.EscapeString(lotterybroadcast.ErrBackfillSlow.Error()))
+		}
+	} else {
+		// Cache hit: top up in background if short of 100.
+		go w.topUpHistoryCache(context.WithoutCancel(ctx), code)
 	}
 	if len(rows) == 0 {
 		if fetchErr == "" {
@@ -450,6 +476,57 @@ func (w worker) lotteryHistory(ctx context.Context, token string, chat safew.Cha
 	}
 	_, err = w.client.SendMessageEx(ctx, token, chatID, html.EscapeString(text), safew.SendOptions{ReplyMarkup: historyKeyboard(code, page, pageCount)})
 	return err
+}
+
+// ensureHistoryCache backfills the given games concurrently, waiting at most
+// lotteryOnDemandTimeout. It returns the last source error (if any) and
+// ErrBackfillSlow when some game is still loading (another backfill in flight
+// or the wait ran out; loading continues in the background).
+func (w worker) ensureHistoryCache(ctx context.Context, codes []string) (string, error) {
+	if w.lb == nil || w.lb.backfiller == nil {
+		return "开奖播报未启用", nil
+	}
+	type res struct {
+		out     lotterybroadcast.BackfillOutcome
+		started bool
+	}
+	ch := make(chan res, len(codes))
+	for _, code := range codes {
+		go func(code string) {
+			// Detached so a slow source keeps filling the cache after we reply.
+			out, started := w.lb.backfiller.TryBackfillGame(context.WithoutCancel(ctx), code)
+			ch <- res{out, started}
+		}(code)
+	}
+	timer := time.NewTimer(lotteryOnDemandTimeout)
+	defer timer.Stop()
+	lastErr, slow := "", false
+	for range codes {
+		select {
+		case r := <-ch:
+			if !r.started {
+				slow = true
+			} else if r.out.Err != "" {
+				lastErr = r.out.Err
+			}
+		case <-timer.C:
+			return lastErr, lotterybroadcast.ErrBackfillSlow
+		case <-ctx.Done():
+			return lastErr, ctx.Err()
+		}
+	}
+	if slow {
+		return lastErr, lotterybroadcast.ErrBackfillSlow
+	}
+	return lastErr, nil
+}
+
+// topUpHistoryCache backfills one game when its cache is below 100 (throttled, fire-and-forget).
+func (w worker) topUpHistoryCache(ctx context.Context, code string) {
+	if w.lb == nil || w.lb.backfiller == nil {
+		return
+	}
+	w.lb.backfiller.TopUp(ctx, code)
 }
 
 // editHistoryPage handles the 上一页/下一页 buttons of a history message.

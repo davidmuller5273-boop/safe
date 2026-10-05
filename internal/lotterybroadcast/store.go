@@ -191,7 +191,9 @@ func (s *Store) LatestIssue(code string) (string, error) {
 
 // LatestResult returns the stored row with the highest issue.
 func (s *Store) LatestResult(code string) (ResultRow, bool, error) {
-	rows, err := s.recentRows(code, 50)
+	// Backfilled rows can have ids out of issue order, so scan the whole
+	// per-game cache (trimmed to HistoryCacheSize) instead of the top ids.
+	rows, err := s.recentRows(code, HistoryCacheSize*3)
 	if err != nil || len(rows) == 0 {
 		return ResultRow{}, false, err
 	}
@@ -219,10 +221,10 @@ func (s *Store) LatestResults(codes []string) ([]ResultRow, error) {
 
 // History returns up to limit stored rows, highest issue first.
 func (s *Store) History(code string, limit int) ([]ResultRow, error) {
-	if limit < 1 || limit > 100 {
-		limit = 100
+	if limit < 1 || limit > HistoryCacheSize {
+		limit = HistoryCacheSize
 	}
-	rows, err := s.recentRows(code, 300)
+	rows, err := s.recentRows(code, HistoryCacheSize*3)
 	if err != nil {
 		return nil, err
 	}
@@ -231,6 +233,30 @@ func (s *Store) History(code string, limit int) ([]ResultRow, error) {
 		rows = rows[:limit]
 	}
 	return rows, nil
+}
+
+// CountResults returns how many stored issues a game has.
+func (s *Store) CountResults(code string) (int, error) {
+	var n int
+	err := s.DB.Raw("SELECT COUNT(*) FROM `"+TableResults+"` WHERE game_code = ?", code).Scan(&n).Error
+	return n, err
+}
+
+// TrimHistory deletes stored issues beyond the newest `keep` (by issue order).
+func (s *Store) TrimHistory(code string, keep int) (int64, error) {
+	if keep < 1 {
+		keep = HistoryCacheSize
+	}
+	var rows []ResultRow
+	if err := s.DB.Raw("SELECT id, issue FROM `"+TableResults+"` WHERE game_code = ?", code).Scan(&rows).Error; err != nil {
+		return 0, err
+	}
+	ids := TrimIDsBeyondKeep(rows, keep)
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	res := s.DB.Exec("DELETE FROM `"+TableResults+"` WHERE game_code = ? AND id IN ?", code, ids)
+	return res.RowsAffected, res.Error
 }
 
 // SaveResult upserts (game_code, issue); inserted reports a brand-new row.

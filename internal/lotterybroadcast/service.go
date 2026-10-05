@@ -24,9 +24,15 @@ const (
 	Marksix6HistoryURL = "https://api2.marksix6.net/"
 	MacaujcLatestURL   = "https://macaumarksix.com/api/macaujc2.com"
 	MacaujcHistoryURL  = "https://history.macaumarksix.com/history/macaujc2/y/%d"
-	HuiniaoURL         = "https://api.huiniao.top/interface/home/lotteryHistory"
-	PublicRepoJSDelivr = "https://cdn.jsdelivr.net/gh/wenjinliuu/lottery-data-repo@main/public_data/draws/%s.json"
-	PublicRepoGitHub   = "https://api.github.com/repos/wenjinliuu/lottery-data-repo/contents/public_data/draws/%s.json"
+	// 澳门六合彩 (old, 22:32) — same draw that Marksix6 "macau" mirrors.
+	MacauOldLatestURL  = "https://macaumarksix.com/api/macaujc.com"
+	MacauOldHistoryURL = "https://history.macaumarksix.com/history/macaujc/y/%d"
+	// List endpoints used only for the 100-issue history cache.
+	HuiniaoHistoryLimit = 100
+	RealtimeHistoryPath = "QuanGuoCai/getHistoryLotteryInfo.do"
+	HuiniaoURL          = "https://api.huiniao.top/interface/home/lotteryHistory"
+	PublicRepoJSDelivr  = "https://cdn.jsdelivr.net/gh/wenjinliuu/lottery-data-repo@main/public_data/draws/%s.json"
+	PublicRepoGitHub    = "https://api.github.com/repos/wenjinliuu/lottery-data-repo/contents/public_data/draws/%s.json"
 )
 
 const hkjcQuery = "\n        fragment lotteryDrawsFragment on LotteryDraw {\n    id\n    year\n    no\n" +
@@ -91,6 +97,8 @@ type Service struct {
 	Sources Sources
 	// ProviderTimeout bounds each provider (Python: asyncio.wait_for(..., 9)).
 	ProviderTimeout time.Duration
+	// CacheSourceTimeout bounds each history-cache source (0 = 20s).
+	CacheSourceTimeout time.Duration
 	// providersFn is overridable in tests.
 	providersFn func(game Game) []provider
 	headers     map[string]string
@@ -623,8 +631,26 @@ func (s *Service) historyMarksix6(ctx context.Context, game Game, limit int) ([]
 }
 
 func (s *Service) historyMacaujc(ctx context.Context, game Game, limit int) ([]Result, error) {
+	rows, err := s.historyMacaujcFrom(ctx, game, limit, MacaujcLatestURL, MacaujcHistoryURL)
+	if err != nil {
+		return nil, fmt.Errorf("macaujc.com 新澳六合彩查询失败：%v", err)
+	}
+	return rows, nil
+}
+
+// historyMacauOld reads 澳门六合彩 from macaujc.com's yearly history (used for the cache).
+func (s *Service) historyMacauOld(ctx context.Context, game Game, limit int) ([]Result, error) {
+	rows, err := s.historyMacaujcFrom(ctx, game, limit, MacauOldLatestURL, MacauOldHistoryURL)
+	if err != nil {
+		return nil, fmt.Errorf("macaujc.com 澳门六合彩历史查询失败：%v", err)
+	}
+	return rows, nil
+}
+
+// historyMacaujcFrom merges latest + this year + last year; succeeds when any page parses.
+func (s *Service) historyMacaujcFrom(ctx context.Context, game Game, limit int, latestURL, historyFmt string) ([]Result, error) {
 	now := time.Now().UTC().Add(8 * time.Hour)
-	urls := []string{MacaujcLatestURL, fmt.Sprintf(MacaujcHistoryURL, now.Year()), fmt.Sprintf(MacaujcHistoryURL, now.Year()-1)}
+	urls := []string{latestURL, fmt.Sprintf(historyFmt, now.Year()), fmt.Sprintf(historyFmt, now.Year()-1)}
 	client := s.newClient(false)
 	bodies := make([][]byte, len(urls))
 	errs := make([]error, len(urls))
@@ -634,40 +660,164 @@ func (s *Service) historyMacaujc(ctx context.Context, game Game, limit int) ([]R
 		go func(i int, u string) { defer wg.Done(); bodies[i], errs[i] = s.get(ctx, client, u, nil, nil) }(i, u)
 	}
 	wg.Wait()
-	var err error
-	for _, e := range errs {
-		if e != nil {
-			err = e
-			break
+	merged := map[string]Result{}
+	var firstErr error
+	for i, b := range bodies {
+		if errs[i] != nil {
+			if firstErr == nil {
+				firstErr = errs[i]
+			}
+			continue
+		}
+		payload, perr := DecodeJSON(b)
+		if perr != nil {
+			if firstErr == nil {
+				firstErr = perr
+			}
+			continue
+		}
+		for _, r := range ParseMacaujcPayload(game, payload) {
+			merged[r.Issue] = r
 		}
 	}
-	if err == nil {
-		merged := map[string]Result{}
-		for _, b := range bodies {
-			payload, perr := DecodeJSON(b)
-			if perr != nil {
-				err = perr
-				break
+	if len(merged) == 0 {
+		if firstErr == nil {
+			firstErr = errors.New("接口返回缺少开奖记录")
+		}
+		return nil, firstErr
+	}
+	rows := make([]Result, 0, len(merged))
+	for _, r := range merged {
+		rows = append(rows, r)
+	}
+	sortByIssueDesc(rows)
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
+}
+
+// ---- history cache (最近100期) ----
+
+type historySource struct {
+	name string
+	fn   func(ctx context.Context) ([]Result, error)
+}
+
+func (s *Service) cacheSources(game Game, limit int) []historySource {
+	huiniao := historySource{"慧鸟", func(ctx context.Context) ([]Result, error) { return s.historyHuiniao(ctx, game, limit) }}
+	realtime := historySource{"api16868", func(ctx context.Context) ([]Result, error) { return s.historyRealtime(ctx, game) }}
+	marksix6 := historySource{"Marksix6", func(ctx context.Context) ([]Result, error) { return s.historyMarksix6(ctx, game, limit) }}
+	switch game.Source {
+	case "cwl":
+		return []historySource{{"中国福彩网", func(ctx context.Context) ([]Result, error) { return s.historyCWL(ctx, game, limit) }}, huiniao, realtime}
+	case "sport":
+		return []historySource{{"中国体彩网", func(ctx context.Context) ([]Result, error) { return s.historySport(ctx, game, limit) }}, huiniao, realtime}
+	case "hkjc":
+		return []historySource{{"香港赛马会", func(ctx context.Context) ([]Result, error) { return s.historyHKJC(ctx, game, limit) }}, marksix6}
+	case "macaujc":
+		return []historySource{{"macaujc.com", func(ctx context.Context) ([]Result, error) { return s.historyMacaujc(ctx, game, limit) }}, marksix6}
+	}
+	// marksix6 (澳门六合彩): macaujc.com yearly list first (Marksix6 only exposes ~10 issues).
+	return []historySource{{"macaujc.com", func(ctx context.Context) ([]Result, error) { return s.historyMacauOld(ctx, game, limit) }}, marksix6}
+}
+
+// CacheHistory returns up to limit issues (newest first) for the history cache,
+// merging list-capable sources in priority order until limit is reached.
+// Earlier (more official) sources win when two sources report the same issue.
+func (s *Service) CacheHistory(ctx context.Context, code string, limit int) ([]Result, error) {
+	game, ok := Games[code]
+	if !ok {
+		return nil, errors.New("未知彩种")
+	}
+	if limit < 1 || limit > HistoryCacheSize {
+		limit = HistoryCacheSize
+	}
+	return mergeHistorySources(ctx, game, limit, s.cacheSources(game, limit), s.cacheSourceTimeout())
+}
+
+func (s *Service) cacheSourceTimeout() time.Duration {
+	if s.CacheSourceTimeout > 0 {
+		return s.CacheSourceTimeout
+	}
+	return 20 * time.Second
+}
+
+func mergeHistorySources(ctx context.Context, game Game, limit int, sources []historySource, perSource time.Duration) ([]Result, error) {
+	merged := map[string]Result{}
+	var errs []string
+	for _, src := range sources {
+		if len(merged) >= limit || ctx.Err() != nil {
+			break
+		}
+		sctx, cancel := context.WithTimeout(ctx, perSource)
+		rows, err := src.fn(sctx)
+		cancel()
+		if err != nil {
+			errs = append(errs, src.name+"："+err.Error())
+			continue
+		}
+		for _, r := range rows {
+			if r.Issue == "" {
+				continue
 			}
-			for _, r := range ParseMacaujcPayload(game, payload) {
+			if _, dup := merged[r.Issue]; !dup {
 				merged[r.Issue] = r
 			}
 		}
-		if err == nil {
-			if len(merged) == 0 {
-				err = errors.New("接口返回缺少开奖记录")
-			} else {
-				rows := make([]Result, 0, len(merged))
-				for _, r := range merged {
-					rows = append(rows, r)
-				}
-				sortByIssueDesc(rows)
-				if len(rows) > limit {
-					rows = rows[:limit]
-				}
-				return rows, nil
-			}
-		}
 	}
-	return nil, fmt.Errorf("macaujc.com 新澳六合彩查询失败：%v", err)
+	if len(merged) == 0 {
+		if len(errs) == 0 {
+			errs = []string{"无可用数据源"}
+		}
+		return nil, fmt.Errorf("%s历史数据源均失败：%s", game.Name, strings.Join(errs, "；"))
+	}
+	rows := make([]Result, 0, len(merged))
+	for _, r := range merged {
+		rows = append(rows, r)
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return CompareIssues(rows[i].Issue, rows[j].Issue) > 0 })
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
+}
+
+func (s *Service) historyHuiniao(ctx context.Context, game Game, limit int) ([]Result, error) {
+	code, ok := huiniaoCodes[game.Code]
+	if !ok {
+		return nil, fmt.Errorf("慧鸟接口暂不支持%s", game.Name)
+	}
+	if limit > HuiniaoHistoryLimit {
+		limit = HuiniaoHistoryLimit
+	}
+	payload, err := s.getJSON(ctx, s.newClient(false), HuiniaoURL, url.Values{"type": {code}, "page": {"1"}, "limit": {strconv.Itoa(limit)}}, nil)
+	if err != nil {
+		return nil, err
+	}
+	rows := ParseHuiniaoHistory(game, payload)
+	if len(rows) == 0 {
+		return nil, errors.New("接口返回缺少开奖记录")
+	}
+	return rows, nil
+}
+
+func (s *Service) historyRealtime(ctx context.Context, game Game) ([]Result, error) {
+	rc, ok := realtimeCodes[game.Code]
+	if !ok {
+		return nil, fmt.Errorf("实时接口暂不支持%s", game.Name)
+	}
+	u := s.Sources.RealtimeURL + "/" + RealtimeHistoryPath
+	payload, err := s.getJSON(ctx, s.newClient(false), u, url.Values{"lotCode": {rc[0]}}, nil)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := ParseRealtimeHistory(game, payload, u)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, errors.New("接口返回缺少开奖记录")
+	}
+	return rows, nil
 }

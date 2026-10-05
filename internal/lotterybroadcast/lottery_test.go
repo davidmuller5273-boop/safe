@@ -519,3 +519,307 @@ func TestSelectorsExpandAndLabels(t *testing.T) {
 	eq(t, SelectorLabel("marksix"), "全部六合彩")
 	eq(t, ExpandSelectors([]string{"hklhc", "marksix", "ssq"}), []string{"ssq", "hklhc", "macau_lhc", "new_macau_lhc"})
 }
+
+// ---- history backfill ----
+
+type memHistory struct {
+	*memRepo
+	counts map[string]int // optional override; nil → derive from results
+}
+
+func newMemHistory() *memHistory {
+	return &memHistory{memRepo: newMemRepo()}
+}
+
+func (m *memHistory) CountResults(code string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.counts != nil {
+		return m.counts[code], nil
+	}
+	return len(m.results[code]), nil
+}
+
+func (m *memHistory) TrimHistory(code string, keep int) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rows := make([]ResultRow, 0, len(m.results[code]))
+	for i, r := range m.results[code] {
+		rows = append(rows, ResultRow{ID: uint64(i + 1), Issue: r.Issue, GameCode: code})
+	}
+	ids := TrimIDsBeyondKeep(rows, keep)
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	drop := map[uint64]bool{}
+	for _, id := range ids {
+		drop[id] = true
+	}
+	var kept []Result
+	for i, r := range m.results[code] {
+		if !drop[uint64(i+1)] {
+			kept = append(kept, r)
+		}
+	}
+	m.results[code] = kept
+	return int64(len(ids)), nil
+}
+
+type fakeHistoryFetcher struct {
+	byCode map[string][]Result
+	errs   map[string]string
+	calls  []string
+}
+
+func (f *fakeHistoryFetcher) CacheHistory(_ context.Context, code string, limit int) ([]Result, error) {
+	f.calls = append(f.calls, code)
+	if e, ok := f.errs[code]; ok {
+		return nil, fmt.Errorf("%s", e)
+	}
+	rows := append([]Result(nil), f.byCode[code]...)
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
+}
+
+func ssqRow(issue string) Result {
+	return Result{Source: "cwl", GameCode: "ssq", GameName: "双色球", Issue: issue, DrawTime: "2026-01-01",
+		Primary: []string{"01", "02", "03", "04", "05", "06"}, Secondary: []string{"16"}}
+}
+
+func TestParseSportHistoryList(t *testing.T) {
+	payload := mustJSON(t, `{"value":{"list":[
+		{"lotteryDrawNum":"26099","lotteryDrawTime":"2026-08-25","lotteryDrawResult":"01 02 03 04 05 06 07"},
+		{"lotteryDrawNum":"26098","lotteryDrawTime":"2026-08-23","lotteryDrawResult":"08 09 10 11 12 13 14"}
+	]}}`)
+	rows, err := ParseSportHistory(Games["dlt"], payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, len(rows), 2)
+	eq(t, rows[0].Issue, "26099")
+	eq(t, rows[0].Primary, []string{"01", "02", "03", "04", "05"})
+	eq(t, rows[1].Issue, "26098")
+}
+
+func TestParseHKJCAndMacaujcHistoryLists(t *testing.T) {
+	hk := ParseHKJCHistory(Games["hklhc"], mustJSON(t, `{"data":{"lotteryDraws":[
+		{"year":2026,"no":93,"drawDate":"2026-08-25T00:00:00+08:00","status":"Result","drawResult":{"drawnNo":[1,18,19,25,34,38],"xDrawnNo":7}},
+		{"year":2026,"no":92,"drawDate":"2026-08-22T00:00:00+08:00","status":"Result","drawResult":{"drawnNo":[2,3,4,5,6,7],"xDrawnNo":8}}
+	]}}`))
+	eq(t, len(hk), 2)
+	eq(t, hk[0].Issue, "2026093")
+	eq(t, hk[1].Issue, "2026092")
+
+	mj := ParseMacaujcPayload(Games["new_macau_lhc"], mustJSON(t, `[
+		{"expect":"2026239","openTime":"2026-08-27 21:32:32","openCode":"47,43,34,17,22,07,05"},
+		{"expect":"2026238","openTime":"2026-08-26 21:32:32","openCode":"01,02,03,04,05,06,07"}
+	]`))
+	eq(t, len(mj), 2)
+	eq(t, mj[0].Issue, "2026239")
+}
+
+func TestParsePublicRepoHistoryList(t *testing.T) {
+	rows := ParsePublicRepoHistory(Games["ssq"], mustJSON(t, `{"draws":[
+		{"issue":"2026100","draw_date":"2026-08-26","number_raw":"01 02 03 04 05 06 07"},
+		{"issue":"2026099","draw_date":"2026-08-24","number_raw":"08 09 10 11 12 13 14"}
+	]}`), "")
+	eq(t, len(rows), 2)
+	eq(t, rows[0].Issue, "2026100")
+	eq(t, rows[0].Secondary, []string{"07"})
+}
+
+func TestTrimIDsBeyondKeep(t *testing.T) {
+	var rows []ResultRow
+	for i := 1; i <= 105; i++ {
+		rows = append(rows, ResultRow{ID: uint64(i), Issue: fmt.Sprintf("2026%03d", i)})
+	}
+	ids := TrimIDsBeyondKeep(rows, 100)
+	eq(t, len(ids), 5)
+	// Oldest five (issues 001-005) should be trimmed.
+	want := map[uint64]bool{1: true, 2: true, 3: true, 4: true, 5: true}
+	for _, id := range ids {
+		if !want[id] {
+			t.Fatalf("unexpected trim id %d", id)
+		}
+	}
+	eq(t, len(TrimIDsBeyondKeep(rows[:100], 100)), 0)
+}
+
+func TestBackfillDoesNotEnqueueBroadcasts(t *testing.T) {
+	store := newMemHistory()
+	store.subs["-1001"] = []string{"all"}
+	var hist []Result
+	for i := 100; i >= 1; i-- {
+		hist = append(hist, ssqRow(fmt.Sprintf("2026%03d", i)))
+	}
+	fetcher := &fakeHistoryFetcher{byCode: map[string][]Result{"ssq": hist}}
+	out := BackfillGame(context.Background(), store, fetcher, "ssq")
+	eq(t, out.Err, "")
+	eq(t, out.Saved, 100)
+	eq(t, len(store.outbox), 0) // backfill never broadcasts
+	n, _ := store.CountResults("ssq")
+	eq(t, n, 100)
+	issue, _ := store.LatestIssue("ssq")
+	eq(t, issue, "2026100")
+}
+
+func TestNewIssueAfterBackfillBroadcastsOnce(t *testing.T) {
+	store := newMemHistory()
+	store.subs["-1001"] = []string{"ssq"}
+	var hist []Result
+	for i := 50; i >= 1; i-- {
+		hist = append(hist, ssqRow(fmt.Sprintf("2026%03d", i)))
+	}
+	fetcher := &fakeHistoryFetcher{byCode: map[string][]Result{"ssq": hist}}
+	BackfillGame(context.Background(), store, fetcher, "ssq")
+	eq(t, len(store.outbox), 0)
+
+	// A brand-new issue after backfill must still broadcast exactly once.
+	live := &fakeFetcher{result: ssqRow("2026051")}
+	Refresh(context.Background(), store.memRepo, live, []string{"ssq"}, allowAll)
+	eq(t, len(store.outbox), 1)
+	Refresh(context.Background(), store.memRepo, live, []string{"ssq"}, allowAll)
+	eq(t, len(store.outbox), 1)
+	if !strings.Contains(store.outbox[0], "第:2026051期") {
+		t.Fatal(store.outbox[0])
+	}
+}
+
+func TestBackfillSkipsNewerThanKnown(t *testing.T) {
+	store := newMemHistory()
+	// Baseline already at 2026050 (first-seen by poller).
+	store.results["ssq"] = []Result{ssqRow("2026050")}
+	fetcher := &fakeHistoryFetcher{byCode: map[string][]Result{"ssq": {
+		ssqRow("2026051"), // live new — must NOT be claimed by backfill
+		ssqRow("2026050"),
+		ssqRow("2026049"),
+	}}}
+	out := BackfillGame(context.Background(), store, fetcher, "ssq")
+	eq(t, out.Err, "")
+	issue, _ := store.LatestIssue("ssq")
+	eq(t, issue, "2026050") // 2026051 still free for Refresh to broadcast
+	n, _ := store.CountResults("ssq")
+	eq(t, n, 2) // 50 + 49
+
+	store.subs["-1"] = []string{"ssq"}
+	Refresh(context.Background(), store.memRepo, &fakeFetcher{result: ssqRow("2026051")}, []string{"ssq"}, allowAll)
+	eq(t, len(store.outbox), 1)
+}
+
+func TestBackfillAllContinuesOnPerGameFailure(t *testing.T) {
+	store := newMemHistory()
+	fetcher := &fakeHistoryFetcher{
+		byCode: map[string][]Result{"ssq": {ssqRow("2026001")}},
+		errs:   map[string]string{"dlt": "sporttery down"},
+	}
+	outs := BackfillAll(context.Background(), store, fetcher, []string{"ssq", "dlt"})
+	eq(t, len(outs), 2)
+	var sawFail, sawOK bool
+	for _, o := range outs {
+		if o.Code == "dlt" && o.Err != "" {
+			sawFail = true
+		}
+		if o.Code == "ssq" && o.Err == "" {
+			sawOK = true
+		}
+	}
+	if !sawFail || !sawOK {
+		t.Fatalf("outs=%+v", outs)
+	}
+	eq(t, store.status["sport"], "sporttery down")
+}
+
+func TestCodesNeedingBackfill(t *testing.T) {
+	store := newMemHistory()
+	store.counts = map[string]int{"ssq": 100, "dlt": 3, "fc3d": 0}
+	need, err := CodesNeedingBackfill(store, []string{"ssq", "dlt", "fc3d"}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, need, []string{"dlt", "fc3d"})
+}
+
+func TestBackfillTrimsTo100(t *testing.T) {
+	store := newMemHistory()
+	// Empty cache: fetch returns 100; after insert+trim we keep exactly 100.
+	var hist []Result
+	for i := 110; i >= 1; i-- { // fetcher will be capped by BackfillGame to 100
+		hist = append(hist, ssqRow(fmt.Sprintf("2026%03d", i)))
+	}
+	out := BackfillGame(context.Background(), store, &fakeHistoryFetcher{byCode: map[string][]Result{"ssq": hist}}, "ssq")
+	eq(t, out.Err, "")
+	n, _ := store.CountResults("ssq")
+	eq(t, n, 100)
+	issue, _ := store.LatestIssue("ssq")
+	eq(t, issue, "2026110")
+
+	// Extra older rows (below the known latest) get trimmed away.
+	for i := 1; i <= 20; i++ {
+		_, _ = store.SaveResult(ssqRow(fmt.Sprintf("2025%03d", i)))
+	}
+	n, _ = store.CountResults("ssq")
+	if n <= 100 {
+		t.Fatalf("expected >100 before trim, got %d", n)
+	}
+	trimmed, err := store.TrimHistory("ssq", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trimmed < 20 {
+		t.Fatalf("trimmed=%d", trimmed)
+	}
+	n, _ = store.CountResults("ssq")
+	eq(t, n, 100)
+	issue, _ = store.LatestIssue("ssq")
+	eq(t, issue, "2026110")
+}
+
+func TestParseHuiniaoHistoryList(t *testing.T) {
+	payload := mustJSON(t, `{"code":1,"data":{"data":{"list":[
+		{"code":"2026113","day":"2026-09-29","one":"03","two":"04","three":"20","four":"24","five":"29","six":"30","seven":"11","open_time":"2026-09-29 21:15:00"},
+		{"code":"2026112","day":"2026-09-27","one":"01","two":"04","three":"11","four":"12","five":"17","six":"29","seven":"11","open_time":"2026-09-27 21:15:00"}
+	]}}}`)
+	rows := ParseHuiniaoHistory(Games["ssq"], payload)
+	eq(t, len(rows), 2)
+	eq(t, rows[0].Issue, "2026113")
+	eq(t, rows[0].Primary, []string{"03", "04", "20", "24", "29", "30"})
+	eq(t, rows[0].Secondary, []string{"11"})
+	eq(t, rows[0].Source, "huiniao")
+}
+
+func TestParseRealtimeHistoryList(t *testing.T) {
+	payload := mustJSON(t, `{"errorCode":0,"result":{"data":[
+		{"preDrawIssue":2026113,"preDrawTime":"2026-09-29 21:30:00","preDrawCode":"03,04,20,24,29,30,11"},
+		{"preDrawIssue":2026112,"preDrawTime":"2026-09-27 21:30:00","preDrawCode":"01,04,11,12,17,29,11"}
+	]}}`)
+	rows, err := ParseRealtimeHistory(Games["ssq"], payload, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, len(rows), 2)
+	eq(t, rows[0].Issue, "2026113")
+	eq(t, rows[0].Source, "realtime168")
+}
+
+func TestMergeHistorySourcesPrefersEarlier(t *testing.T) {
+	game := Games["ssq"]
+	sources := []historySource{
+		{"a", func(context.Context) ([]Result, error) {
+			return []Result{ssqRow("2026002"), ssqRow("2026001")}, nil
+		}},
+		{"b", func(context.Context) ([]Result, error) {
+			r := ssqRow("2026002")
+			r.Source = "other"
+			return []Result{r, ssqRow("2026003")}, nil
+		}},
+	}
+	rows, err := mergeHistorySources(context.Background(), game, 100, sources, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, len(rows), 3)
+	eq(t, rows[0].Issue, "2026003")
+	eq(t, rows[1].Source, "cwl") // earlier source kept for 2026002
+}
