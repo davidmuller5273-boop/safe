@@ -6,6 +6,7 @@ import (
 
 	"github.com/davidmuller5273-boop/safe/internal/domain"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 const (
@@ -42,7 +43,9 @@ func LoadForChat(db *gorm.DB, chatID string) (Settings, error) {
 	chatID = strings.TrimSpace(chatID)
 	if chatID != "" {
 		var group domain.BotGroupAd
-		err := db.Where("chat_id = ?", chatID).First(&group).Error
+		// Quiet: missing group row is expected and falls back to global ads.
+		err := db.Session(&gorm.Session{Logger: logger.Default.LogMode(logger.Silent)}).
+			Where("chat_id = ?", chatID).First(&group).Error
 		if err != nil && err != gorm.ErrRecordNotFound {
 			return Settings{}, err
 		}
