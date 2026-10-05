@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -55,10 +56,56 @@ type Message struct {
 }
 
 type Update struct {
-	UpdateID     int               `json:"update_id"`
-	Message      *Message          `json:"message"`
-	MyChatMember *ChatMemberUpdated `json:"my_chat_member"`
-	ChatMember   *ChatMemberUpdated `json:"chat_member"`
+	UpdateID      int                `json:"update_id"`
+	Message       *Message           `json:"message"`
+	MyChatMember  *ChatMemberUpdated `json:"my_chat_member"`
+	ChatMember    *ChatMemberUpdated `json:"chat_member"`
+	CallbackQuery *CallbackQuery     `json:"callback_query"`
+}
+
+// CallbackQuery is an inline-keyboard button click.
+type CallbackQuery struct {
+	ID              string   `json:"id"`
+	From            User     `json:"from"`
+	Message         *Message `json:"message"`
+	InlineMessageID string   `json:"inline_message_id"`
+	Data            string   `json:"data"`
+}
+
+// InlineKeyboardButton is one inline button (callback_data must be ≤ 64 bytes).
+type InlineKeyboardButton struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data,omitempty"`
+	URL          string `json:"url,omitempty"`
+}
+
+// InlineKeyboardMarkup is reply_markup.inline_keyboard.
+type InlineKeyboardMarkup struct {
+	InlineKeyboard [][]InlineKeyboardButton `json:"inline_keyboard"`
+}
+
+// SendOptions are optional sendMessage fields.
+type SendOptions struct {
+	ReplyMarkup         *InlineKeyboardMarkup
+	DisableNotification bool
+	// PlainText disables parse_mode (default is HTML like SendMessage).
+	PlainText bool
+}
+
+// APIError is a SafeW API error response.
+type APIError struct {
+	HTTPStatus  int
+	Code        int
+	Description string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("SafeW API 错误（HTTP %d, code %d）: %s", e.HTTPStatus, e.Code, e.Description)
+}
+
+// IsNotModified reports the harmless "message is not modified" edit error.
+func IsNotModified(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "not modified")
 }
 
 type ChatMemberUpdated struct {
@@ -82,11 +129,127 @@ type apiResponse[T any] struct {
 }
 
 func (c *Client) SendMessage(ctx context.Context, token, chatID, text string) error {
-	body, err := json.Marshal(map[string]any{"chat_id": chatID, "text": text, "parse_mode": "HTML"})
+	_, err := c.SendMessageEx(ctx, token, chatID, text, SendOptions{})
+	return err
+}
+
+// SendMessageEx sends a message (HTML parse mode unless PlainText) and returns the sent Message
+// so callers can pin it or attach/refresh inline keyboards.
+func (c *Client) SendMessageEx(ctx context.Context, token, chatID, text string, opts SendOptions) (Message, error) {
+	payload := map[string]any{"chat_id": chatID, "text": text}
+	if !opts.PlainText {
+		payload["parse_mode"] = "HTML"
+	}
+	if opts.ReplyMarkup != nil {
+		payload["reply_markup"] = opts.ReplyMarkup
+	}
+	if opts.DisableNotification {
+		payload["disable_notification"] = true
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return Message{}, err
+	}
+	var msg Message
+	if err := c.do(ctx, token, "sendMessage", body, &msg); err != nil {
+		return Message{}, err
+	}
+	return msg, nil
+}
+
+// PinChatMessage pins a message (bot must be a group admin with pin rights).
+func (c *Client) PinChatMessage(ctx context.Context, token, chatID string, messageID int, disableNotification bool) error {
+	payload := map[string]any{"chat_id": chatID, "message_id": messageID}
+	if disableNotification {
+		payload["disable_notification"] = true
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	return c.do(ctx, token, "sendMessage", body, nil)
+	return c.doAlt(ctx, token, "pinChatMessage", "pinchatmessage", body, nil)
+}
+
+// AnswerCallbackQuery acknowledges a button click with an optional toast (≤200 chars).
+func (c *Client) AnswerCallbackQuery(ctx context.Context, token, callbackQueryID, text string, showAlert bool) error {
+	payload := map[string]any{"callback_query_id": callbackQueryID}
+	if text != "" {
+		r := []rune(text)
+		if len(r) > 200 {
+			text = string(r[:200])
+		}
+		payload["text"] = text
+	}
+	if showAlert {
+		payload["show_alert"] = true
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return c.doAlt(ctx, token, "answerCallbackQuery", "answercallbackquery", body, nil)
+}
+
+// EditMessageReplyMarkup replaces the inline keyboard of a bot message.
+func (c *Client) EditMessageReplyMarkup(ctx context.Context, token, chatID string, messageID int, markup *InlineKeyboardMarkup) error {
+	payload := map[string]any{"chat_id": chatID, "message_id": messageID}
+	if markup != nil {
+		payload["reply_markup"] = markup
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, token, "editMessageReplyMarkup", body, nil)
+}
+
+// EditMessageText replaces text (HTML) and keyboard of a bot message.
+func (c *Client) EditMessageText(ctx context.Context, token, chatID string, messageID int, text string, markup *InlineKeyboardMarkup) error {
+	payload := map[string]any{"chat_id": chatID, "message_id": messageID, "text": text, "parse_mode": "HTML"}
+	if markup != nil {
+		payload["reply_markup"] = markup
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, token, "editMessageText", body, nil)
+}
+
+// SendDocument uploads a file via multipart/form-data.
+func (c *Client) SendDocument(ctx context.Context, token, chatID, filename string, data []byte, caption string) (Message, error) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	_ = w.WriteField("chat_id", chatID)
+	if caption != "" {
+		_ = w.WriteField("caption", caption)
+	}
+	part, err := w.CreateFormFile("document", filename)
+	if err != nil {
+		return Message{}, err
+	}
+	if _, err := part.Write(data); err != nil {
+		return Message{}, err
+	}
+	if err := w.Close(); err != nil {
+		return Message{}, err
+	}
+	var msg Message
+	if err := c.doRaw(ctx, token, "sendDocument", w.FormDataContentType(), buf.Bytes(), &msg); err != nil {
+		return Message{}, err
+	}
+	return msg, nil
+}
+
+// doAlt calls method, retrying once with alt when the API answers 404
+// (the SafeW docs list some paths in lower case, e.g. /pinchatmessage).
+func (c *Client) doAlt(ctx context.Context, token, method, alt string, body []byte, result any) error {
+	err := c.do(ctx, token, method, body, result)
+	var apiErr *APIError
+	if err != nil && alt != "" && alt != method && errors.As(err, &apiErr) && apiErr.HTTPStatus == http.StatusNotFound {
+		return c.do(ctx, token, alt, body, result)
+	}
+	return err
 }
 
 func (c *Client) GetUpdates(ctx context.Context, token string, offset int64, limit, timeout int) ([]Update, error) {
@@ -100,7 +263,7 @@ func (c *Client) GetUpdates(ctx context.Context, token string, offset int64, lim
 		"offset":          offset,
 		"limit":           limit,
 		"timeout":         timeout,
-		"allowed_updates": []string{"message", "my_chat_member", "chat_member"},
+		"allowed_updates": []string{"message", "my_chat_member", "chat_member", "callback_query"},
 	})
 	if err != nil {
 		return nil, err
@@ -122,11 +285,15 @@ func (c *Client) GetMe(ctx context.Context, token string) (User, error) {
 }
 
 func (c *Client) do(ctx context.Context, token, method string, body []byte, result any) error {
+	return c.doRaw(ctx, token, method, "application/json", body, result)
+}
+
+func (c *Client) doRaw(ctx context.Context, token, method, contentType string, body []byte, result any) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/bot"+token+"/"+method, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
-	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Content-Type", contentType)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		var urlError *url.Error
@@ -152,7 +319,7 @@ func (c *Client) do(ctx context.Context, token, method string, body []byte, resu
 		if envelope.Description == "" {
 			envelope.Description = http.StatusText(response.StatusCode)
 		}
-		return fmt.Errorf("SafeW API 错误（HTTP %d, code %d）: %s", response.StatusCode, envelope.ErrorCode, envelope.Description)
+		return &APIError{HTTPStatus: response.StatusCode, Code: envelope.ErrorCode, Description: envelope.Description}
 	}
 	if result == nil || len(envelope.Result) == 0 || string(envelope.Result) == "null" {
 		return nil
@@ -162,8 +329,6 @@ func (c *Client) do(ctx context.Context, token, method string, body []byte, resu
 	}
 	return nil
 }
-
-
 
 func (c *Client) GetChatMemberCount(ctx context.Context, token, chatID string) (int, error) {
 	body, err := json.Marshal(map[string]any{"chat_id": chatID})
