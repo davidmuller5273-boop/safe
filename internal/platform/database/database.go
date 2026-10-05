@@ -3,7 +3,10 @@ package database
 import (
 	"errors"
 	"fmt"
+	"log"
+
 	"github.com/davidmuller5273-boop/safe/internal/domain"
+	"github.com/davidmuller5273-boop/safe/internal/lotterybroadcast"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -38,6 +41,11 @@ func Open(host string, port int, user, password, database string) (*gorm.DB, err
 	}
 	if err = ensureBotGroupSettingsSchema(db); err != nil {
 		return nil, err
+	}
+	// 开奖播报 tables: CREATE TABLE IF NOT EXISTS with inline indexes (no AutoMigrate).
+	// Non-fatal so a lottery-broadcast schema problem can never stop the other services.
+	if err = lotterybroadcast.EnsureSchema(db); err != nil {
+		log.Printf("开奖播报表结构检查失败（开奖播报功能暂不可用，其他功能不受影响）: %v", err)
 	}
 	return db, seed(db)
 }
