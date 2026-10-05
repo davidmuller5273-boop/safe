@@ -3,7 +3,6 @@ package safewbot
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -13,6 +12,8 @@ import (
 	"github.com/davidmuller5273-boop/safe/internal/ads"
 	"github.com/davidmuller5273-boop/safe/internal/botperm"
 	"github.com/davidmuller5273-boop/safe/internal/config"
+	"github.com/davidmuller5273-boop/safe/internal/domain"
+	"github.com/davidmuller5273-boop/safe/internal/lottery/hotnumber"
 	"github.com/davidmuller5273-boop/safe/internal/platform/database"
 	"github.com/davidmuller5273-boop/safe/internal/platform/safew"
 	"github.com/davidmuller5273-boop/safe/internal/queue"
@@ -100,7 +101,7 @@ func (w worker) runQueue(ctx context.Context) error {
 					return err
 				}
 				if ready {
-					log.Printf("SafeW 热号预测消息发送成功: issue=%s sizes=%v", message.IssueNumber, mapKeys(texts))
+					log.Printf("SafeW 热号预测消息发送成功: issue=%s keys=%v", message.IssueNumber, texts.keys())
 				} else {
 					log.Printf("热号样本尚不足，本期不发送: issue=%s", message.IssueNumber)
 				}
@@ -117,7 +118,7 @@ func (w worker) runQueue(ctx context.Context) error {
 	}
 }
 
-func (w worker) sendToChats(ctx context.Context, botConfig systemconfig.SafeW, message queue.LotteryDrawMessage, texts map[int]string) error {
+func (w worker) sendToChats(ctx context.Context, botConfig systemconfig.SafeW, message queue.LotteryDrawMessage, texts predictionTexts) error {
 	targets, err := w.perms.ListPushTargets()
 	if err != nil {
 		return err
@@ -128,26 +129,19 @@ func (w worker) sendToChats(ctx context.Context, botConfig systemconfig.SafeW, m
 	}
 	for _, group := range targets {
 		chatID := group.ChatID
-		want6 := botperm.Effective6Code(group)
-		want7 := botperm.Effective7Code(group)
-		if !want6 && !want7 {
-			log.Printf("群已开推送但未开启6/7码，跳过: chat=%s issue=%s", chatID, message.IssueNumber)
+		jobs := groupPushJobs(group)
+		if len(jobs) == 0 {
+			log.Printf("群已开推送但未开启冠军/亚军6/7码，跳过: chat=%s issue=%s", chatID, message.IssueNumber)
 			continue
 		}
-		sizes := make([]int, 0, 2)
-		if want6 {
-			sizes = append(sizes, 6)
-		}
-		if want7 {
-			sizes = append(sizes, 7)
-		}
-		for _, size := range sizes {
-			body, ok := texts[size]
-			if !ok || body == "" {
-				log.Printf("群需要 %d码 但本期文本未就绪，跳过: chat=%s issue=%s", size, chatID, message.IssueNumber)
+		for _, job := range jobs {
+			body, ok := texts.get(job.position, job.size)
+			if !ok {
+				log.Printf("群需要 %s%d码 但本期文本未就绪，跳过: chat=%s issue=%s",
+					job.label, job.size, chatID, message.IssueNumber)
 				continue
 			}
-			kind := fmt.Sprintf("%d", size)
+			kind := sendKind(job.position, job.size)
 			sent, err := w.queue.WasSent(ctx, message.RecordID, chatID, kind)
 			if err != nil {
 				return err
@@ -170,12 +164,29 @@ func (w worker) sendToChats(ctx context.Context, botConfig systemconfig.SafeW, m
 	return nil
 }
 
-func mapKeys(m map[int]string) []int {
-	keys := make([]int, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
+type pushJob struct {
+	position int
+	size     int
+	label    string
+}
+
+// groupPushJobs lists champion/runner-up × size combinations enabled for a group.
+// Champion and runner-up are independent; a group with only runner-up on still pushes.
+func groupPushJobs(group domain.BotGroupSettings) []pushJob {
+	var jobs []pushJob
+	if botperm.Effective6Code(group) {
+		jobs = append(jobs, pushJob{position: hotnumber.PositionChampion, size: 6, label: "冠军"})
 	}
-	return keys
+	if botperm.Effective7Code(group) {
+		jobs = append(jobs, pushJob{position: hotnumber.PositionChampion, size: 7, label: "冠军"})
+	}
+	if botperm.EffectiveRunnerUp6Code(group) {
+		jobs = append(jobs, pushJob{position: hotnumber.PositionRunnerUp, size: 6, label: "亚军"})
+	}
+	if botperm.EffectiveRunnerUp7Code(group) {
+		jobs = append(jobs, pushJob{position: hotnumber.PositionRunnerUp, size: 7, label: "亚军"})
+	}
+	return jobs
 }
 
 func wait(ctx context.Context, duration time.Duration) bool {

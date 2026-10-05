@@ -57,6 +57,8 @@ func ensureBotGroupSettingsSchema(db *gorm.DB) error {
 		{"ChatType", "ALTER TABLE `bot_group_settings` ADD COLUMN `chat_type` varchar(32) DEFAULT NULL"},
 		{"Enable6Code", "ALTER TABLE `bot_group_settings` ADD COLUMN `enable_6_code` tinyint(1) NOT NULL DEFAULT 0"},
 		{"Enable7Code", "ALTER TABLE `bot_group_settings` ADD COLUMN `enable_7_code` tinyint(1) NOT NULL DEFAULT 0"},
+		{"EnableRunnerUp6Code", "ALTER TABLE `bot_group_settings` ADD COLUMN `enable_runner_up_6_code` tinyint(1) NOT NULL DEFAULT 0"},
+		{"EnableRunnerUp7Code", "ALTER TABLE `bot_group_settings` ADD COLUMN `enable_runner_up_7_code` tinyint(1) NOT NULL DEFAULT 0"},
 	}
 	for _, c := range cols {
 		if db.Migrator().HasColumn(&domain.BotGroupSettings{}, c.field) {
@@ -179,10 +181,11 @@ func isDuplicateColumn(err error) bool {
 	return strings.Contains(msg, "1060") || strings.Contains(msg, "Duplicate column")
 }
 
-// ensureHotNumberPredictionSchema adds code_size column/defaults and a composite
-// unique index (lottery_type_id, issue_number, code_size). Without code_size in
-// the unique key, size-6 and size-7 FirstOrCreate rows clobber each other.
-// Index work is manual because GORM AutoMigrate can emit Error 1061.
+// ensureHotNumberPredictionSchema adds code_size / position columns and a
+// composite unique index (lottery_type_id, issue_number, code_size, position).
+// Without position in the unique key, champion and runner-up rows for the same
+// issue/size would clobber each other. Index work is manual because GORM
+// AutoMigrate can emit Error 1061 on duplicate indexes.
 func ensureHotNumberPredictionSchema(db *gorm.DB) error {
 	if !db.Migrator().HasColumn(&domain.HotNumberPrediction{}, "CodeSize") {
 		if err := db.Exec("ALTER TABLE `hot_number_predictions` ADD COLUMN `code_size` int NOT NULL DEFAULT 7").Error; err != nil {
@@ -191,23 +194,37 @@ func ensureHotNumberPredictionSchema(db *gorm.DB) error {
 			}
 		}
 	}
-	// Backfill code_size for rows created before the column existed.
+	if !db.Migrator().HasColumn(&domain.HotNumberPrediction{}, "Position") {
+		if err := db.Exec("ALTER TABLE `hot_number_predictions` ADD COLUMN `position` int NOT NULL DEFAULT 1").Error; err != nil {
+			if !isDuplicateColumn(err) {
+				return err
+			}
+		}
+	}
+	// Backfill code_size / position for rows created before the columns existed.
 	if err := db.Exec("UPDATE hot_number_predictions SET code_size = 7 WHERE code_size = 0 OR code_size IS NULL").Error; err != nil {
 		return err
 	}
-	// Drop legacy unique index (lottery_type_id, issue_number) if present.
-	for _, legacy := range []string{"idx_hot_predictions_lottery_issue", "idx_lottery_type_id_issue_number"} {
+	if err := db.Exec("UPDATE hot_number_predictions SET position = 1 WHERE position = 0 OR position IS NULL").Error; err != nil {
+		return err
+	}
+	// Drop legacy unique indexes that omit position (and older ones that omit code_size).
+	for _, legacy := range []string{
+		"idx_hot_predictions_lottery_issue",
+		"idx_lottery_type_id_issue_number",
+		"idx_hot_predictions_lottery_issue_size",
+	} {
 		if db.Migrator().HasIndex(&domain.HotNumberPrediction{}, legacy) {
 			if err := db.Migrator().DropIndex(&domain.HotNumberPrediction{}, legacy); err != nil {
 				return err
 			}
 		}
 	}
-	const name = "idx_hot_predictions_lottery_issue_size"
+	const name = "idx_hot_predictions_lottery_issue_size_pos"
 	if db.Migrator().HasIndex(&domain.HotNumberPrediction{}, name) {
 		return nil
 	}
-	if err := db.Exec("CREATE UNIQUE INDEX `" + name + "` ON `hot_number_predictions` (`lottery_type_id`,`issue_number`,`code_size`)").Error; err != nil {
+	if err := db.Exec("CREATE UNIQUE INDEX `" + name + "` ON `hot_number_predictions` (`lottery_type_id`,`issue_number`,`code_size`,`position`)").Error; err != nil {
 		// Another process may have created it; ignore duplicate name.
 		if isDuplicateKeyName(err) {
 			return nil

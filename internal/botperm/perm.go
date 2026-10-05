@@ -184,8 +184,9 @@ func (s *Store) EnsureGroup(chatID string) error {
 		return nil
 	}
 	return s.DB.Exec(`
-INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code, created_at, updated_at)
-VALUES (?, 0, 0, 0, NOW(3), NOW(3))
+INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+  enable_runner_up_6_code, enable_runner_up_7_code, created_at, updated_at)
+VALUES (?, 0, 0, 0, 0, 0, NOW(3), NOW(3))
 ON DUPLICATE KEY UPDATE chat_id = chat_id
 `, chatID).Error
 }
@@ -225,19 +226,22 @@ func (s *Store) ListPushEnabledChatIDs() ([]string, error) {
 // Loads flag columns via int scan for the same reason as GetGroupSettings.
 func (s *Store) ListPushTargets() ([]domain.BotGroupSettings, error) {
 	type rawRow struct {
-		ID          uint           `gorm:"column:id"`
-		ChatID      string         `gorm:"column:chat_id"`
-		Title       sql.NullString `gorm:"column:title"`
-		Username    sql.NullString `gorm:"column:username"`
-		ChatType    sql.NullString `gorm:"column:chat_type"`
-		PushEnabled int            `gorm:"column:push_enabled"`
-		Enable6Code int            `gorm:"column:enable_6_code"`
-		Enable7Code int            `gorm:"column:enable_7_code"`
+		ID                  uint           `gorm:"column:id"`
+		ChatID              string         `gorm:"column:chat_id"`
+		Title               sql.NullString `gorm:"column:title"`
+		Username            sql.NullString `gorm:"column:username"`
+		ChatType            sql.NullString `gorm:"column:chat_type"`
+		PushEnabled         int            `gorm:"column:push_enabled"`
+		Enable6Code         int            `gorm:"column:enable_6_code"`
+		Enable7Code         int            `gorm:"column:enable_7_code"`
+		EnableRunnerUp6Code int            `gorm:"column:enable_runner_up_6_code"`
+		EnableRunnerUp7Code int            `gorm:"column:enable_runner_up_7_code"`
 	}
 	var raws []rawRow
 	err := s.DB.Raw(`
 SELECT id, chat_id, title, username, chat_type,
-       push_enabled, enable_6_code, enable_7_code
+       push_enabled, enable_6_code, enable_7_code,
+       enable_runner_up_6_code, enable_runner_up_7_code
 FROM bot_group_settings WHERE push_enabled = 1 ORDER BY id`).Scan(&raws).Error
 	if err != nil {
 		return nil, err
@@ -245,22 +249,24 @@ FROM bot_group_settings WHERE push_enabled = 1 ORDER BY id`).Scan(&raws).Error
 	out := make([]domain.BotGroupSettings, 0, len(raws))
 	for _, r := range raws {
 		out = append(out, domain.BotGroupSettings{
-			ID:          r.ID,
-			ChatID:      r.ChatID,
-			Title:       r.Title.String,
-			Username:    r.Username.String,
-			ChatType:    r.ChatType.String,
-			PushEnabled: r.PushEnabled != 0,
-			Enable6Code: r.Enable6Code != 0,
-			Enable7Code: r.Enable7Code != 0,
+			ID:                  r.ID,
+			ChatID:              r.ChatID,
+			Title:               r.Title.String,
+			Username:            r.Username.String,
+			ChatType:            r.ChatType.String,
+			PushEnabled:         r.PushEnabled != 0,
+			Enable6Code:         r.Enable6Code != 0,
+			Enable7Code:         r.Enable7Code != 0,
+			EnableRunnerUp6Code: r.EnableRunnerUp6Code != 0,
+			EnableRunnerUp7Code: r.EnableRunnerUp7Code != 0,
 		})
 	}
 	return out, nil
 }
 
-// SetCodeMode enables/disables 6-code or 7-code predictions for a group.
-// Enabling one mode turns on push and turns the other mode off so a single
-// /开启6码 or /开启7码 is enough.
+// SetCodeMode enables/disables champion (冠军) 6-code or 7-code predictions.
+// Enabling one mode turns on push and turns the other champion mode off so a
+// single /开启6码 or /开启7码 is enough. Runner-up flags are left unchanged.
 // Uses MySQL INSERT ... ON DUPLICATE KEY UPDATE so a missing row is created
 // (does not rely on EnsureGroup / GORM OnConflict alone). Verifies with a
 // raw int scan so GORM bool mapping cannot mask a failed write.
@@ -279,24 +285,55 @@ func (s *Store) SetCodeMode(chatID string, size int, enabled bool) error {
 	if err := s.DB.Exec(sqlStr, chatID).Error; err != nil {
 		return err
 	}
-	e6, e7, push, err := s.scanCodeFlags(chatID)
+	flags, err := s.scanAllCodeFlags(chatID)
 	if err != nil {
 		return fmt.Errorf("SetCodeMode: 写入后校验失败 (chat_id=%s): %w", chatID, err)
 	}
-	if !codeModeVerifyOK(size, enabled, e6, e7, push) {
+	if !codeModeVerifyOK(size, enabled, flags.e6, flags.e7, flags.push) {
 		return fmt.Errorf("SetCodeMode: 写入后状态不符 (chat_id=%s size=%d enabled=%v enable_6=%d enable_7=%d push=%d)",
-			chatID, size, enabled, e6, e7, push)
+			chatID, size, enabled, flags.e6, flags.e7, flags.push)
 	}
 	return nil
 }
 
-// codeModeUpsertSQL returns MySQL upsert SQL; the sole bind arg is chat_id.
+// SetRunnerUpCodeMode enables/disables runner-up (亚军) 6/7 predictions.
+// Enabling one runner-up size turns on push and turns the other runner-up size
+// off. Champion (enable_6_code / enable_7_code) flags are never modified.
+func (s *Store) SetRunnerUpCodeMode(chatID string, size int, enabled bool) error {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return errors.New("chat_id 不能为空")
+	}
+	if size != 6 && size != 7 {
+		return errors.New("size 必须为 6 或 7")
+	}
+	sqlStr, err := runnerUpCodeModeUpsertSQL(size, enabled)
+	if err != nil {
+		return err
+	}
+	if err := s.DB.Exec(sqlStr, chatID).Error; err != nil {
+		return err
+	}
+	flags, err := s.scanAllCodeFlags(chatID)
+	if err != nil {
+		return fmt.Errorf("SetRunnerUpCodeMode: 写入后校验失败 (chat_id=%s): %w", chatID, err)
+	}
+	if !runnerUpCodeModeVerifyOK(size, enabled, flags.r6, flags.r7, flags.push) {
+		return fmt.Errorf("SetRunnerUpCodeMode: 写入后状态不符 (chat_id=%s size=%d enabled=%v r6=%d r7=%d push=%d)",
+			chatID, size, enabled, flags.r6, flags.r7, flags.push)
+	}
+	return nil
+}
+
+// codeModeUpsertSQL returns MySQL upsert SQL for champion flags; sole bind arg is chat_id.
+// INSERT defaults runner-up flags to 0; UPDATE never touches runner-up columns.
 func codeModeUpsertSQL(size int, enabled bool) (string, error) {
 	switch {
 	case size == 6 && enabled:
 		return `
-INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code, created_at, updated_at)
-VALUES (?, 1, 1, 0, NOW(3), NOW(3))
+INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+  enable_runner_up_6_code, enable_runner_up_7_code, created_at, updated_at)
+VALUES (?, 1, 1, 0, 0, 0, NOW(3), NOW(3))
 ON DUPLICATE KEY UPDATE
   push_enabled=VALUES(push_enabled),
   enable_6_code=VALUES(enable_6_code),
@@ -304,8 +341,9 @@ ON DUPLICATE KEY UPDATE
   updated_at=VALUES(updated_at)`, nil
 	case size == 7 && enabled:
 		return `
-INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code, created_at, updated_at)
-VALUES (?, 1, 0, 1, NOW(3), NOW(3))
+INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+  enable_runner_up_6_code, enable_runner_up_7_code, created_at, updated_at)
+VALUES (?, 1, 0, 1, 0, 0, NOW(3), NOW(3))
 ON DUPLICATE KEY UPDATE
   push_enabled=VALUES(push_enabled),
   enable_6_code=VALUES(enable_6_code),
@@ -314,17 +352,64 @@ ON DUPLICATE KEY UPDATE
 	case size == 6 && !enabled:
 		// Disable only flips that flag; still upsert if the row is missing.
 		return `
-INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code, created_at, updated_at)
-VALUES (?, 0, 0, 0, NOW(3), NOW(3))
+INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+  enable_runner_up_6_code, enable_runner_up_7_code, created_at, updated_at)
+VALUES (?, 0, 0, 0, 0, 0, NOW(3), NOW(3))
 ON DUPLICATE KEY UPDATE
   enable_6_code=0,
   updated_at=VALUES(updated_at)`, nil
 	case size == 7 && !enabled:
 		return `
-INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code, created_at, updated_at)
-VALUES (?, 0, 0, 0, NOW(3), NOW(3))
+INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+  enable_runner_up_6_code, enable_runner_up_7_code, created_at, updated_at)
+VALUES (?, 0, 0, 0, 0, 0, NOW(3), NOW(3))
 ON DUPLICATE KEY UPDATE
   enable_7_code=0,
+  updated_at=VALUES(updated_at)`, nil
+	default:
+		return "", errors.New("size 必须为 6 或 7")
+	}
+}
+
+// runnerUpCodeModeUpsertSQL returns MySQL upsert SQL for runner-up flags.
+// INSERT defaults champion flags to 0; UPDATE never touches champion columns.
+func runnerUpCodeModeUpsertSQL(size int, enabled bool) (string, error) {
+	switch {
+	case size == 6 && enabled:
+		return `
+INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+  enable_runner_up_6_code, enable_runner_up_7_code, created_at, updated_at)
+VALUES (?, 1, 0, 0, 1, 0, NOW(3), NOW(3))
+ON DUPLICATE KEY UPDATE
+  push_enabled=1,
+  enable_runner_up_6_code=1,
+  enable_runner_up_7_code=0,
+  updated_at=VALUES(updated_at)`, nil
+	case size == 7 && enabled:
+		return `
+INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+  enable_runner_up_6_code, enable_runner_up_7_code, created_at, updated_at)
+VALUES (?, 1, 0, 0, 0, 1, NOW(3), NOW(3))
+ON DUPLICATE KEY UPDATE
+  push_enabled=1,
+  enable_runner_up_6_code=0,
+  enable_runner_up_7_code=1,
+  updated_at=VALUES(updated_at)`, nil
+	case size == 6 && !enabled:
+		return `
+INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+  enable_runner_up_6_code, enable_runner_up_7_code, created_at, updated_at)
+VALUES (?, 0, 0, 0, 0, 0, NOW(3), NOW(3))
+ON DUPLICATE KEY UPDATE
+  enable_runner_up_6_code=0,
+  updated_at=VALUES(updated_at)`, nil
+	case size == 7 && !enabled:
+		return `
+INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+  enable_runner_up_6_code, enable_runner_up_7_code, created_at, updated_at)
+VALUES (?, 0, 0, 0, 0, 0, NOW(3), NOW(3))
+ON DUPLICATE KEY UPDATE
+  enable_runner_up_7_code=0,
   updated_at=VALUES(updated_at)`, nil
 	default:
 		return "", errors.New("size 必须为 6 或 7")
@@ -346,18 +431,39 @@ func codeModeVerifyOK(size int, enabled bool, e6, e7, push int) bool {
 	}
 }
 
-func (s *Store) scanCodeFlags(chatID string) (e6, e7, push int, err error) {
-	err = s.DB.Raw(
-		`SELECT enable_6_code, enable_7_code, push_enabled FROM bot_group_settings WHERE chat_id=?`,
-		chatID,
-	).Row().Scan(&e6, &e7, &push)
-	if err != nil {
-		return 0, 0, 0, err
+func runnerUpCodeModeVerifyOK(size int, enabled bool, r6, r7, push int) bool {
+	switch {
+	case size == 6 && enabled:
+		return r6 != 0 && r7 == 0 && push != 0
+	case size == 7 && enabled:
+		return r7 != 0 && r6 == 0 && push != 0
+	case size == 6 && !enabled:
+		return r6 == 0
+	case size == 7 && !enabled:
+		return r7 == 0
+	default:
+		return false
 	}
-	return e6, e7, push, nil
 }
 
-// IsCodeEnabled reports whether the given code size is enabled for the chat.
+type codeFlags struct {
+	e6, e7, r6, r7, push int
+}
+
+func (s *Store) scanAllCodeFlags(chatID string) (codeFlags, error) {
+	var f codeFlags
+	err := s.DB.Raw(
+		`SELECT enable_6_code, enable_7_code, enable_runner_up_6_code, enable_runner_up_7_code, push_enabled
+FROM bot_group_settings WHERE chat_id=?`,
+		chatID,
+	).Row().Scan(&f.e6, &f.e7, &f.r6, &f.r7, &f.push)
+	if err != nil {
+		return codeFlags{}, err
+	}
+	return f, nil
+}
+
+// IsCodeEnabled reports whether the given champion code size is enabled for the chat.
 func (s *Store) IsCodeEnabled(chatID string, size int) (bool, error) {
 	if size != 6 && size != 7 {
 		return false, errors.New("size 必须为 6 或 7")
@@ -382,23 +488,41 @@ func Effective6Code(row domain.BotGroupSettings) bool {
 	return row.Enable6Code
 }
 
+// EffectiveRunnerUp6Code is true when EnableRunnerUp6Code is set.
+func EffectiveRunnerUp6Code(row domain.BotGroupSettings) bool {
+	return row.EnableRunnerUp6Code
+}
+
+// EffectiveRunnerUp7Code is true when EnableRunnerUp7Code is set.
+func EffectiveRunnerUp7Code(row domain.BotGroupSettings) bool {
+	return row.EnableRunnerUp7Code
+}
+
+// HasAnyCodeMode reports whether any champion or runner-up size is enabled.
+func HasAnyCodeMode(row domain.BotGroupSettings) bool {
+	return Effective6Code(row) || Effective7Code(row) ||
+		EffectiveRunnerUp6Code(row) || EffectiveRunnerUp7Code(row)
+}
+
 // GetGroupSettings returns persisted settings for a chat, or zero value if missing.
 // Flag columns are scanned as ints then mapped to bool so tinyint/GORM bool
 // quirks cannot report enable_6_code=0 when the DB value is 1.
 func (s *Store) GetGroupSettings(chatID string) (domain.BotGroupSettings, error) {
 	chatID = strings.TrimSpace(chatID)
 	var (
-		row                domain.BotGroupSettings
-		push, e6, e7       int
-		title, user, ctype sql.NullString
-		created, updated   sql.NullTime
+		row                  domain.BotGroupSettings
+		push, e6, e7, r6, r7 int
+		title, user, ctype   sql.NullString
+		created, updated     sql.NullTime
 	)
 	err := s.DB.Raw(`
 SELECT id, chat_id, title, username, chat_type,
-       push_enabled, enable_6_code, enable_7_code, created_at, updated_at
+       push_enabled, enable_6_code, enable_7_code,
+       enable_runner_up_6_code, enable_runner_up_7_code,
+       created_at, updated_at
 FROM bot_group_settings WHERE chat_id=?`, chatID).Row().Scan(
 		&row.ID, &row.ChatID, &title, &user, &ctype,
-		&push, &e6, &e7, &created, &updated,
+		&push, &e6, &e7, &r6, &r7, &created, &updated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.BotGroupSettings{ChatID: chatID}, nil
@@ -416,6 +540,8 @@ FROM bot_group_settings WHERE chat_id=?`, chatID).Row().Scan(
 	row.PushEnabled = push != 0
 	row.Enable6Code = e6 != 0
 	row.Enable7Code = e7 != 0
+	row.EnableRunnerUp6Code = r6 != 0
+	row.EnableRunnerUp7Code = r7 != 0
 	if created.Valid {
 		row.CreatedAt = created.Time
 	}
@@ -425,12 +551,14 @@ FROM bot_group_settings WHERE chat_id=?`, chatID).Row().Scan(
 	return row, nil
 }
 
-// FormatGroupCodeState summarizes push / 6 / 7 flags and effective send modes.
+// FormatGroupCodeState summarizes push / champion / runner-up flags and effective send modes.
 func FormatGroupCodeState(row domain.BotGroupSettings) string {
 	return fmt.Sprintf(
-		"push=%v enable_6=%v enable_7=%v（生效推送: 6码=%v 7码=%v）",
+		"push=%v enable_6=%v enable_7=%v enable_亚军6=%v enable_亚军7=%v（生效推送: 冠军6码=%v 冠军7码=%v 亚军6码=%v 亚军7码=%v）",
 		row.PushEnabled, row.Enable6Code, row.Enable7Code,
+		row.EnableRunnerUp6Code, row.EnableRunnerUp7Code,
 		Effective6Code(row), Effective7Code(row),
+		EffectiveRunnerUp6Code(row), EffectiveRunnerUp7Code(row),
 	)
 }
 

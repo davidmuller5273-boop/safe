@@ -68,11 +68,16 @@ type DrawRecord struct {
 // HotNumberPrediction stores the ordered hot-number state used to predict
 // an issue and its evaluation after the draw completes.
 // CodeSize is 6 or 7; existing rows default to 7.
+// Position is 1=冠军 / 2=亚军; existing rows default to 1.
+// Unique key (lottery_type_id, issue_number, code_size, position) is managed
+// in ensureHotNumberPredictionSchema — do not add a gorm uniqueIndex tag here
+// (AutoMigrate previously duplicated indexes and crashed safew-bot).
 type HotNumberPrediction struct {
 	ID              uint       `json:"id" gorm:"primaryKey"`
 	LotteryTypeID   uint       `json:"lottery_type_id" gorm:"not null;index"`
 	IssueNumber     string     `json:"issue_number" gorm:"size:64;not null;index"`
 	CodeSize        int        `json:"code_size" gorm:"not null;default:7;index"`
+	Position        int        `json:"position" gorm:"column:position;not null;default:1;index"`
 	HotNumbers      string     `json:"hot_numbers" gorm:"type:text;not null"`
 	Prediction      string     `json:"prediction" gorm:"size:16;not null"`
 	ActualHotNumber string     `json:"actual_hot_number" gorm:"size:2"`
@@ -116,16 +121,18 @@ type BotGroupAd struct {
 // BotGroupSettings tracks per-group bot behaviour.
 // PushEnabled defaults to false when the bot first sees a group.
 type BotGroupSettings struct {
-	ID          uint      `json:"id" gorm:"primaryKey"`
-	ChatID      string    `json:"chat_id" gorm:"uniqueIndex;size:64;not null"`
-	Title       string    `json:"title" gorm:"size:255"`
-	Username    string    `json:"username" gorm:"size:128"`
-	ChatType    string    `json:"chat_type" gorm:"size:32"`
-	PushEnabled bool      `json:"push_enabled" gorm:"not null;default:false"`
-	Enable6Code bool      `json:"enable_6_code" gorm:"column:enable_6_code;not null;default:false"`
-	Enable7Code bool      `json:"enable_7_code" gorm:"column:enable_7_code;not null;default:false"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID                  uint      `json:"id" gorm:"primaryKey"`
+	ChatID              string    `json:"chat_id" gorm:"uniqueIndex;size:64;not null"`
+	Title               string    `json:"title" gorm:"size:255"`
+	Username            string    `json:"username" gorm:"size:128"`
+	ChatType            string    `json:"chat_type" gorm:"size:32"`
+	PushEnabled         bool      `json:"push_enabled" gorm:"not null;default:false"`
+	Enable6Code         bool      `json:"enable_6_code" gorm:"column:enable_6_code;not null;default:false"`
+	Enable7Code         bool      `json:"enable_7_code" gorm:"column:enable_7_code;not null;default:false"`
+	EnableRunnerUp6Code bool      `json:"enable_runner_up_6_code" gorm:"column:enable_runner_up_6_code;not null;default:false"`
+	EnableRunnerUp7Code bool      `json:"enable_runner_up_7_code" gorm:"column:enable_runner_up_7_code;not null;default:false"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 // BotGroupMember caches members observed in a group (messages + admin refresh).

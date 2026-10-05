@@ -16,6 +16,27 @@ func TestCarTenMapsToZero(t *testing.T) {
 	}
 }
 
+func TestFromDrawResultAtRunnerUp(t *testing.T) {
+	got, err := FromDrawResultAt([]string{"03", "10", "01"}, PositionRunnerUp)
+	if err != nil || got != "0" {
+		t.Fatalf("FromDrawResultAt runner-up = %q, %v", got, err)
+	}
+	got, err = FromDrawResultAt([]string{"03", "08", "01"}, PositionRunnerUp)
+	if err != nil || got != "8" {
+		t.Fatalf("FromDrawResultAt runner-up = %q, %v", got, err)
+	}
+	if _, err := FromDrawResultAt([]string{"03"}, PositionRunnerUp); err == nil {
+		t.Fatal("expected error when result shorter than position")
+	}
+}
+
+func TestFromDrawResultDefaultsToChampion(t *testing.T) {
+	got, err := FromDrawResult([]string{"05", "08"})
+	if err != nil || got != "5" {
+		t.Fatalf("FromDrawResult() = %q, %v", got, err)
+	}
+}
+
 func TestContainsEvaluatesFirstHotNumber(t *testing.T) {
 	prediction := []string{"0", "1", "2", "4", "5", "6", "8"}
 	if !Contains(prediction, "8") {
@@ -39,5 +60,14 @@ func TestTakeFirst(t *testing.T) {
 	got = TakeFirst(nums, 0)
 	if len(got) != 0 {
 		t.Fatalf("TakeFirst zero = %v", got)
+	}
+}
+
+func TestPositionLabel(t *testing.T) {
+	if PositionLabel(PositionChampion) != "冠军" {
+		t.Fatal("champion label")
+	}
+	if PositionLabel(PositionRunnerUp) != "亚军" {
+		t.Fatal("runner-up label")
 	}
 }

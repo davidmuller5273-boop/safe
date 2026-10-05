@@ -34,10 +34,14 @@ func helpForRole(role string) string {
 	super := `
 推送（开发者 / 超级管理员）：
 /push on|off [chat_id] — 开启或关闭群推送（进群默认关闭）
-/开启6码 — 本群只推6码（自动开推送并关闭7码）
-/关闭6码 — 本群关闭6码预测推送
-/开启7码 — 本群只推7码（自动开推送并关闭6码）
-/关闭7码 — 本群关闭7码预测推送
+/开启6码 — 本群只推冠军6码（自动开推送并关闭冠军7码）
+/关闭6码 — 本群关闭冠军6码预测推送
+/开启7码 — 本群只推冠军7码（自动开推送并关闭冠军6码）
+/关闭7码 — 本群关闭冠军7码预测推送
+/开启亚军6码 — 本群只推亚军6码（自动开推送并关闭亚军7码；不影响冠军）
+/关闭亚军6码 — 本群关闭亚军6码预测推送
+/开启亚军7码 — 本群只推亚军7码（自动开推送并关闭亚军6码；不影响冠军）
+/关闭亚军7码 — 本群关闭亚军7码预测推送
 /broadcast <文本> — 向「已开启推送」的群发送
 
 超级管理员管理（仅开发者）：
@@ -57,11 +61,11 @@ func helpForRole(role string) string {
 /clearsuffix global`
 	switch role {
 	case botperm.RoleDeveloper:
-		return "【开发者菜单】\n" + common + groupAdmin + adsGlobal + super + "\n\n说明：进群默认不推送；发 /开启6码 或 /开启7码 即可（自动开推送并关掉另一种）；对外正文一次 sendMessage 发送。"
+		return "【开发者菜单】\n" + common + groupAdmin + adsGlobal + super + "\n\n说明：进群默认不推送；发 /开启6码、/开启7码 或 /开启亚军6码、/开启亚军7码 即可（各自自动开推送并关掉同系列另一种；冠军与亚军互相独立）；对外正文一次 sendMessage 发送。"
 	case botperm.RoleAdmin:
-		return "【超级管理员菜单】\n" + common + groupAdmin + adsGlobal + super + "\n\n说明：进群默认不推送；发 /开启6码 或 /开启7码 即可；不能添加/移除其他超级管理员。"
+		return "【超级管理员菜单】\n" + common + groupAdmin + adsGlobal + super + "\n\n说明：进群默认不推送；发 /开启6码、/开启7码 或 /开启亚军6码、/开启亚军7码 即可；不能添加/移除其他超级管理员。"
 	case botperm.RoleGroupAdmin:
-		return "【群管理员菜单】\n" + common + groupAdmin + "\n\n说明：仅可管理本群广告与 /say；不能开关推送或6/7码。"
+		return "【群管理员菜单】\n" + common + groupAdmin + "\n\n说明：仅可管理本群广告与 /say；不能开关推送或冠军/亚军6/7码。"
 	default:
 		return "【普通用户菜单】\n" + common + "\n\n无更多权限请联系开发者或超级管理员。"
 	}
@@ -206,6 +210,14 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 		return w.cmdSetCodeMode(ctx, botConfig, userID, chatID, 7, true)
 	case "/关闭7码":
 		return w.cmdSetCodeMode(ctx, botConfig, userID, chatID, 7, false)
+	case "/开启亚军6码":
+		return w.cmdSetRunnerUpCodeMode(ctx, botConfig, userID, chatID, 6, true)
+	case "/关闭亚军6码":
+		return w.cmdSetRunnerUpCodeMode(ctx, botConfig, userID, chatID, 6, false)
+	case "/开启亚军7码":
+		return w.cmdSetRunnerUpCodeMode(ctx, botConfig, userID, chatID, 7, true)
+	case "/关闭亚军7码":
+		return w.cmdSetRunnerUpCodeMode(ctx, botConfig, userID, chatID, 7, false)
 	case "/广告前":
 		return w.cmdChineseAd(ctx, botConfig, userID, chatID, args, true)
 	case "/广告后":
@@ -435,7 +447,7 @@ func (w worker) cmdSetCodeMode(ctx context.Context, botConfig systemconfig.SafeW
 		}
 		if !okEffective {
 			return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(
-				"设置失败：开启 %d码 未生效（请检查数据库列 enable_%d_code）\n%s",
+				"设置失败：开启冠军 %d码 未生效（请检查数据库列 enable_%d_code）\n%s",
 				size, size, botperm.FormatGroupCodeState(settings),
 			))
 		}
@@ -444,12 +456,53 @@ func (w worker) cmdSetCodeMode(ctx context.Context, botConfig systemconfig.SafeW
 			other = 6
 		}
 		return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(
-			"已切换为本群只推 %d码（已开推送，已关 %d码）\n%s",
+			"已切换为本群只推冠军 %d码（已开推送，已关冠军 %d码；亚军标志不变）\n%s",
 			size, other, botperm.FormatGroupCodeState(settings),
 		))
 	}
 	return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(
-		"已关闭 %d码预测\n%s",
+		"已关闭冠军 %d码预测\n%s",
+		size, botperm.FormatGroupCodeState(settings),
+	))
+}
+
+func (w worker) cmdSetRunnerUpCodeMode(ctx context.Context, botConfig systemconfig.SafeW, userID, chatID string, size int, enabled bool) error {
+	ok, err := w.perms.CanTogglePush(userID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return w.replyPlain(ctx, botConfig.Token, chatID, "权限不足（需要开发者或超级管理员）")
+	}
+	if err := w.perms.SetRunnerUpCodeMode(chatID, size, enabled); err != nil {
+		return err
+	}
+	settings, err := w.perms.GetGroupSettings(chatID)
+	if err != nil {
+		return err
+	}
+	if enabled {
+		okEffective := botperm.EffectiveRunnerUp6Code(settings)
+		if size == 7 {
+			okEffective = botperm.EffectiveRunnerUp7Code(settings)
+		}
+		if !okEffective {
+			return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(
+				"设置失败：开启亚军 %d码 未生效（请检查数据库列 enable_runner_up_%d_code）\n%s",
+				size, size, botperm.FormatGroupCodeState(settings),
+			))
+		}
+		other := 7
+		if size == 7 {
+			other = 6
+		}
+		return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(
+			"已切换为本群只推亚军 %d码（已开推送，已关亚军 %d码；冠军标志不变）\n%s",
+			size, other, botperm.FormatGroupCodeState(settings),
+		))
+	}
+	return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(
+		"已关闭亚军 %d码预测\n%s",
 		size, botperm.FormatGroupCodeState(settings),
 	))
 }
@@ -647,7 +700,6 @@ func emptyMark(v string) string {
 	return v
 }
 
-
 func (w worker) trackMessageMember(msg *safew.Message) {
 	if msg == nil || msg.From == nil {
 		return
@@ -660,7 +712,6 @@ func (w worker) trackMessageMember(msg *safew.Message) {
 	_ = w.perms.UpsertGroupMeta(chatID, msg.Chat.Title, msg.Chat.Username, msg.Chat.Type)
 	_ = w.perms.UpsertMember(chatID, msg.From.IDString(), msg.From.Username, msg.From.FirstName, false, false)
 }
-
 
 func (w worker) trackChatMember(ev *safew.ChatMemberUpdated) {
 	if ev == nil {
