@@ -14,63 +14,6 @@ import (
 	"github.com/davidmuller5273-boop/safe/internal/systemconfig"
 )
 
-// help text must NOT include docs/使用教程 content.
-func helpForRole(role string) string {
-	common := `/help — 显示你当前权限可见的菜单
-/whoami — 查看 user_id / chat_id / 角色
-/pushstatus — 查看本群推送是否开启`
-	groupAdmin := `
-广告（本群）：
-/广告前 <文本> — 设置本群前广告（空文本则清空）
-/广告后 <文本> — 设置本群后广告（空文本则清空）
-/广告前后 <前广告> | <后广告> — 一次同时设置前后广告（也可换行用 --- 分隔）
-/setprefix [group] <文本>
-/setsuffix [group] <文本>
-/clearprefix [group]
-/clearsuffix [group]
-/adstatus
-/resetads group
-/say <文本>`
-	super := `
-推送（开发者 / 超级管理员）：
-/push on|off [chat_id] — 开启或关闭群推送（进群默认关闭）
-/开启6码 — 本群只推冠军6码（自动开推送并关闭冠军7码）
-/关闭6码 — 本群关闭冠军6码预测推送
-/开启7码 — 本群只推冠军7码（自动开推送并关闭冠军6码）
-/关闭7码 — 本群关闭冠军7码预测推送
-/开启亚军6码 — 本群只推亚军6码（自动开推送并关闭亚军7码；不影响冠军）
-/关闭亚军6码 — 本群关闭亚军6码预测推送
-/开启亚军7码 — 本群只推亚军7码（自动开推送并关闭亚军6码；不影响冠军）
-/关闭亚军7码 — 本群关闭亚军7码预测推送
-/broadcast <文本> — 向「已开启推送」的群发送
-
-超级管理员管理（仅开发者）：
-/addsuperadmin <user_id>
-/removesuperadmin <user_id>
-/listsuperadmins
-
-群管理员（开发者 / 超级管理员）：
-/addgroupadmin <user_id> [chat_id]
-/removegroupadmin <user_id> [chat_id]
-/listgroupadmins [chat_id]`
-	adsGlobal := `
-全局广告（开发者 / 超级管理员）：
-/setprefix global <文本>
-/setsuffix global <文本>
-/clearprefix global
-/clearsuffix global`
-	switch role {
-	case botperm.RoleDeveloper:
-		return "【开发者菜单】\n" + common + groupAdmin + adsGlobal + super + "\n\n说明：进群默认不推送；发 /开启6码、/开启7码 或 /开启亚军6码、/开启亚军7码 即可（各自自动开推送并关掉同系列另一种；冠军与亚军互相独立）；对外正文一次 sendMessage 发送。"
-	case botperm.RoleAdmin:
-		return "【超级管理员菜单】\n" + common + groupAdmin + adsGlobal + super + "\n\n说明：进群默认不推送；发 /开启6码、/开启7码 或 /开启亚军6码、/开启亚军7码 即可；不能添加/移除其他超级管理员。"
-	case botperm.RoleGroupAdmin:
-		return "【群管理员菜单】\n" + common + groupAdmin + "\n\n说明：仅可管理本群广告与 /say；不能开关推送或冠军/亚军6/7码。"
-	default:
-		return "【普通用户菜单】\n" + common + "\n\n无更多权限请联系开发者或超级管理员。"
-	}
-}
-
 func (w worker) runCommands(ctx context.Context) error {
 	var offset int64
 	for {
@@ -108,11 +51,19 @@ func (w worker) runCommands(ctx context.Context) error {
 				w.trackChatMember(update.ChatMember)
 				continue
 			}
+			if update.CallbackQuery != nil {
+				w.handleCallback(ctx, botConfig, update.CallbackQuery)
+				continue
+			}
 			if update.Message == nil {
 				continue
 			}
 			w.trackMessageMember(update.Message)
 			if strings.TrimSpace(update.Message.Text) == "" {
+				continue
+			}
+			if !strings.HasPrefix(strings.TrimSpace(update.Message.Text), "/") {
+				w.handleLotteryKeyword(ctx, botConfig, update.Message.Chat, update.Message.Text)
 				continue
 			}
 			if err := w.handleCommand(ctx, botConfig, update.Message); err != nil {
@@ -152,9 +103,13 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 		return err
 	}
 
+	if handled, err := w.handleLotteryCommand(ctx, botConfig, msg.Chat, userID, cmd, args); handled {
+		return err
+	}
+
 	switch cmd {
-	case "/help", "/start":
-		return w.replyPlain(ctx, botConfig.Token, chatID, helpForRole(role))
+	case "/help", "/start", "/菜单", "/menu", "/帮助":
+		return w.sendPanel(ctx, botConfig.Token, msg.Chat, role)
 	case "/whoami":
 		settings, _ := w.perms.GetGroupSettings(chatID)
 		return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(
@@ -190,18 +145,11 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 		} else if !enabled && action != "on" && action != "enable" && action != "1" && action != "开启" {
 			return w.replyPlain(ctx, botConfig.Token, chatID, "用法: /push on|off [chat_id]")
 		}
-		if err := w.perms.SetPushEnabled(targetChat, enabled); err != nil {
-			return err
-		}
-		settings, err := w.perms.GetGroupSettings(targetChat)
+		text, _, err := w.applyPush(targetChat, enabled)
 		if err != nil {
 			return err
 		}
-		action = "已关闭推送"
-		if enabled {
-			action = "已开启推送"
-		}
-		return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf("%s: %s\n%s", action, targetChat, botperm.FormatGroupCodeState(settings)))
+		return w.replyPlain(ctx, botConfig.Token, chatID, text)
 	case "/开启6码":
 		return w.cmdSetCodeMode(ctx, botConfig, userID, chatID, 6, true)
 	case "/关闭6码":
@@ -413,6 +361,13 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 			return nil
 		}
 		return w.cmdDevMembers(ctx, botConfig.Token, chatID, args)
+	case "/导出所有群成员", "/exportmembers":
+		if !w.perms.IsDeveloper(userID) {
+			return nil
+		}
+		token := botConfig.Token
+		go w.runAsync(ctx, token, chatID, func() error { return w.cmdExportAllMembers(ctx, token, chatID) })
+		return nil
 	default:
 		return nil
 	}
@@ -433,12 +388,21 @@ func (w worker) cmdSetCodeMode(ctx context.Context, botConfig systemconfig.SafeW
 	if !ok {
 		return w.replyPlain(ctx, botConfig.Token, chatID, "权限不足（需要开发者或超级管理员）")
 	}
-	if err := w.perms.SetCodeMode(chatID, size, enabled); err != nil {
+	text, _, err := w.applyCodeMode(chatID, size, enabled)
+	if err != nil {
 		return err
+	}
+	return w.replyPlain(ctx, botConfig.Token, chatID, text)
+}
+
+// applyCodeMode is shared by /开启6码 … commands and panel buttons (permission checked by caller).
+func (w worker) applyCodeMode(chatID string, size int, enabled bool) (text, toast string, err error) {
+	if err := w.perms.SetCodeMode(chatID, size, enabled); err != nil {
+		return "", "", err
 	}
 	settings, err := w.perms.GetGroupSettings(chatID)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	if enabled {
 		okEffective := botperm.Effective6Code(settings)
@@ -446,24 +410,22 @@ func (w worker) cmdSetCodeMode(ctx context.Context, botConfig systemconfig.SafeW
 			okEffective = botperm.Effective7Code(settings)
 		}
 		if !okEffective {
-			return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(
-				"设置失败：开启冠军 %d码 未生效（请检查数据库列 enable_%d_code）\n%s",
-				size, size, botperm.FormatGroupCodeState(settings),
-			))
+			return "", "", fmt.Errorf("设置失败：开启冠军 %d码 未生效（请检查数据库列 enable_%d_code）\n%s",
+				size, size, botperm.FormatGroupCodeState(settings))
 		}
 		other := 7
 		if size == 7 {
 			other = 6
 		}
-		return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(
+		return fmt.Sprintf(
 			"已切换为本群只推冠军 %d码（已开推送，已关冠军 %d码；亚军标志不变）\n%s",
 			size, other, botperm.FormatGroupCodeState(settings),
-		))
+		), fmt.Sprintf("✅ 已切换为冠军%d码", size), nil
 	}
-	return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(
+	return fmt.Sprintf(
 		"已关闭冠军 %d码预测\n%s",
 		size, botperm.FormatGroupCodeState(settings),
-	))
+	), fmt.Sprintf("已关闭冠军%d码", size), nil
 }
 
 func (w worker) cmdSetRunnerUpCodeMode(ctx context.Context, botConfig systemconfig.SafeW, userID, chatID string, size int, enabled bool) error {
@@ -474,12 +436,21 @@ func (w worker) cmdSetRunnerUpCodeMode(ctx context.Context, botConfig systemconf
 	if !ok {
 		return w.replyPlain(ctx, botConfig.Token, chatID, "权限不足（需要开发者或超级管理员）")
 	}
-	if err := w.perms.SetRunnerUpCodeMode(chatID, size, enabled); err != nil {
+	text, _, err := w.applyRunnerUpCodeMode(chatID, size, enabled)
+	if err != nil {
 		return err
+	}
+	return w.replyPlain(ctx, botConfig.Token, chatID, text)
+}
+
+// applyRunnerUpCodeMode is shared by /开启亚军6码 … commands and panel buttons.
+func (w worker) applyRunnerUpCodeMode(chatID string, size int, enabled bool) (text, toast string, err error) {
+	if err := w.perms.SetRunnerUpCodeMode(chatID, size, enabled); err != nil {
+		return "", "", err
 	}
 	settings, err := w.perms.GetGroupSettings(chatID)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	if enabled {
 		okEffective := botperm.EffectiveRunnerUp6Code(settings)
@@ -487,24 +458,42 @@ func (w worker) cmdSetRunnerUpCodeMode(ctx context.Context, botConfig systemconf
 			okEffective = botperm.EffectiveRunnerUp7Code(settings)
 		}
 		if !okEffective {
-			return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(
-				"设置失败：开启亚军 %d码 未生效（请检查数据库列 enable_runner_up_%d_code）\n%s",
-				size, size, botperm.FormatGroupCodeState(settings),
-			))
+			return "", "", fmt.Errorf("设置失败：开启亚军 %d码 未生效（请检查数据库列 enable_runner_up_%d_code）\n%s",
+				size, size, botperm.FormatGroupCodeState(settings))
 		}
 		other := 7
 		if size == 7 {
 			other = 6
 		}
-		return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(
+		return fmt.Sprintf(
 			"已切换为本群只推亚军 %d码（已开推送，已关亚军 %d码；冠军标志不变）\n%s",
 			size, other, botperm.FormatGroupCodeState(settings),
-		))
+		), fmt.Sprintf("✅ 已切换为亚军%d码", size), nil
 	}
-	return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(
+	return fmt.Sprintf(
 		"已关闭亚军 %d码预测\n%s",
 		size, botperm.FormatGroupCodeState(settings),
-	))
+	), fmt.Sprintf("已关闭亚军%d码", size), nil
+}
+
+// applyPush is shared by /push and the panel push button.
+func (w worker) applyPush(targetChat string, enabled bool) (text, toast string, err error) {
+	if err := w.perms.SetPushEnabled(targetChat, enabled); err != nil {
+		return "", "", err
+	}
+	settings, err := w.perms.GetGroupSettings(targetChat)
+	if err != nil {
+		return "", "", err
+	}
+	action := "已关闭推送"
+	if enabled {
+		action = "已开启推送"
+	}
+	toast = action
+	if enabled {
+		toast = "✅ " + action
+	}
+	return fmt.Sprintf("%s: %s\n%s", action, targetChat, botperm.FormatGroupCodeState(settings)), toast, nil
 }
 
 func (w worker) cmdChineseAd(ctx context.Context, botConfig systemconfig.SafeW, userID, chatID, args string, isPrefix bool) error {

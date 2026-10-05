@@ -14,6 +14,7 @@ import (
 	"github.com/davidmuller5273-boop/safe/internal/config"
 	"github.com/davidmuller5273-boop/safe/internal/domain"
 	"github.com/davidmuller5273-boop/safe/internal/lottery/hotnumber"
+	"github.com/davidmuller5273-boop/safe/internal/lotterybroadcast"
 	"github.com/davidmuller5273-boop/safe/internal/platform/database"
 	"github.com/davidmuller5273-boop/safe/internal/platform/safew"
 	"github.com/davidmuller5273-boop/safe/internal/queue"
@@ -48,15 +49,19 @@ func Run() error {
 		queue:  drawQueue,
 		client: safew.NewClient(cfg.SafeWAPIBaseURL),
 		perms:  botperm.NewStore(db, cfg.DeveloperUserIDs),
+		lb:     newLotteryRuntime(lotterybroadcast.NewStore(db), lotterybroadcast.NewService(lotterybroadcast.SourcesFromEnv())),
 	}
 	log.Printf("SafeW 机器人消息服务已启动 (developers=%d)", len(cfg.DeveloperUserIDs))
 
-	errCh := make(chan error, 2)
+	const workers = 4
+	errCh := make(chan error, workers)
 	go func() { errCh <- worker.runQueue(ctx) }()
 	go func() { errCh <- worker.runCommands(ctx) }()
+	go func() { errCh <- worker.runLotteryPoller(ctx) }()
+	go func() { errCh <- worker.runLotterySender(ctx) }()
 
 	var first error
-	for i := 0; i < 2; i++ {
+	for i := 0; i < workers; i++ {
 		if err := <-errCh; err != nil && first == nil {
 			first = err
 			stop()
@@ -70,6 +75,7 @@ type worker struct {
 	queue  *queue.LotteryDrawQueueClient
 	client *safew.Client
 	perms  *botperm.Store
+	lb     *lotteryRuntime // 开奖播报 (nil disables it)
 }
 
 func (w worker) runQueue(ctx context.Context) error {
