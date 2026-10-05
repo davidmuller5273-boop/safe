@@ -3,6 +3,7 @@ package safew
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -52,7 +53,7 @@ func TestPinChatMessageFallsBackToLowercasePath(t *testing.T) {
 		}
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		if body["message_id"].(float64) != 77 || body["chat_id"] != "-100123" {
+		if body["message_id"].(float64) != 77 || body["chat_id"] != float64(-100123) {
 			t.Errorf("body = %v", body)
 		}
 		if _, ok := body["disable_notification"]; ok {
@@ -154,5 +155,69 @@ func TestIsNotModified(t *testing.T) {
 	}
 	if IsNotModified(nil) {
 		t.Fatal("nil is not 'not modified'")
+	}
+}
+
+func TestChatIDValue(t *testing.T) {
+	if ChatIDValue("10000852380") != int64(10000852380) {
+		t.Fatalf("positive = %v", ChatIDValue("10000852380"))
+	}
+	if ChatIDValue("-100123") != int64(-100123) {
+		t.Fatalf("negative = %v", ChatIDValue("-100123"))
+	}
+	if ChatIDValue("@channel") != "@channel" {
+		t.Fatalf("username = %v", ChatIDValue("@channel"))
+	}
+}
+
+func TestSendMessageExRetriesPlainTextWithMarkup(t *testing.T) {
+	var calls []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		calls = append(calls, body)
+		if len(calls) == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"ok":false,"error_code":400,"description":"can't parse entities"}`))
+			return
+		}
+		if body["parse_mode"] != nil {
+			t.Errorf("retry must be PlainText, parse_mode=%v", body["parse_mode"])
+		}
+		if _, ok := body["reply_markup"]; !ok {
+			t.Fatal("retry must keep reply_markup")
+		}
+		if body["chat_id"] != float64(10000852380) {
+			t.Errorf("chat_id = %v", body["chat_id"])
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":9}}`))
+	}))
+	defer server.Close()
+	markup := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{{{Text: "A", CallbackData: "u:q:lt"}}}}
+	msg, err := NewClient(server.URL).SendMessageEx(context.Background(), "t", "10000852380", "<b>hi</b>", SendOptions{ReplyMarkup: markup})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.MessageID != 9 || len(calls) != 2 {
+		t.Fatalf("msg=%d calls=%d", msg.MessageID, len(calls))
+	}
+}
+
+func TestGetUpdatesRequestsCallbackQuery(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		arr, _ := body["allowed_updates"].([]any)
+		joined := fmt.Sprint(arr)
+		if !strings.Contains(joined, "callback_query") {
+			t.Fatalf("allowed_updates = %v", arr)
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
+	}))
+	defer server.Close()
+	if _, err := NewClient(server.URL).GetUpdates(context.Background(), "t", 0, 10, 0); err != nil {
+		t.Fatal(err)
 	}
 }

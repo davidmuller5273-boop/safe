@@ -109,7 +109,7 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 
 	switch cmd {
 	case "/help", "/start", "/菜单", "/menu", "/帮助":
-		return w.sendPanel(ctx, botConfig.Token, msg.Chat, role)
+		return w.sendPanel(ctx, botConfig.Token, msg.Chat, userID, role)
 	case "/whoami":
 		settings, _ := w.perms.GetGroupSettings(chatID)
 		return w.replyPlain(ctx, botConfig.Token, chatID, fmt.Sprintf(

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -128,6 +129,20 @@ type apiResponse[T any] struct {
 	Description string `json:"description"`
 }
 
+// ChatIDValue returns a JSON-friendly chat_id: numeric when the string is all
+// digits (optional leading -), otherwise the original string. SafeW examples
+// use JSON numbers for chat_id.
+func ChatIDValue(chatID string) any {
+	s := strings.TrimSpace(chatID)
+	if s == "" {
+		return s
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return n
+	}
+	return s
+}
+
 func (c *Client) SendMessage(ctx context.Context, token, chatID, text string) error {
 	_, err := c.SendMessageEx(ctx, token, chatID, text, SendOptions{})
 	return err
@@ -135,8 +150,30 @@ func (c *Client) SendMessage(ctx context.Context, token, chatID, text string) er
 
 // SendMessageEx sends a message (HTML parse mode unless PlainText) and returns the sent Message
 // so callers can pin it or attach/refresh inline keyboards.
+// reply_markup is always attached as a JSON object when set. Numeric chat_id strings are
+// sent as JSON numbers. If HTML+markup fails, retries once as PlainText with the same markup.
 func (c *Client) SendMessageEx(ctx context.Context, token, chatID, text string, opts SendOptions) (Message, error) {
-	payload := map[string]any{"chat_id": chatID, "text": text}
+	msg, err := c.sendMessageOnce(ctx, token, chatID, text, opts)
+	if err == nil {
+		return msg, nil
+	}
+	if opts.ReplyMarkup != nil && !opts.PlainText {
+		log.Printf("sendMessage HTML+markup 失败 chat=%s: %v；改用 PlainText 重试", chatID, err)
+		retry := opts
+		retry.PlainText = true
+		msg2, err2 := c.sendMessageOnce(ctx, token, chatID, text, retry)
+		if err2 != nil {
+			log.Printf("sendMessage PlainText+markup 仍失败 chat=%s: %v", chatID, err2)
+			return Message{}, err2
+		}
+		return msg2, nil
+	}
+	log.Printf("sendMessage 失败 chat=%s: %v", chatID, err)
+	return Message{}, err
+}
+
+func (c *Client) sendMessageOnce(ctx context.Context, token, chatID, text string, opts SendOptions) (Message, error) {
+	payload := map[string]any{"chat_id": ChatIDValue(chatID), "text": text}
 	if !opts.PlainText {
 		payload["parse_mode"] = "HTML"
 	}
@@ -159,7 +196,7 @@ func (c *Client) SendMessageEx(ctx context.Context, token, chatID, text string, 
 
 // PinChatMessage pins a message (bot must be a group admin with pin rights).
 func (c *Client) PinChatMessage(ctx context.Context, token, chatID string, messageID int, disableNotification bool) error {
-	payload := map[string]any{"chat_id": chatID, "message_id": messageID}
+	payload := map[string]any{"chat_id": ChatIDValue(chatID), "message_id": messageID}
 	if disableNotification {
 		payload["disable_notification"] = true
 	}
@@ -192,7 +229,7 @@ func (c *Client) AnswerCallbackQuery(ctx context.Context, token, callbackQueryID
 
 // EditMessageReplyMarkup replaces the inline keyboard of a bot message.
 func (c *Client) EditMessageReplyMarkup(ctx context.Context, token, chatID string, messageID int, markup *InlineKeyboardMarkup) error {
-	payload := map[string]any{"chat_id": chatID, "message_id": messageID}
+	payload := map[string]any{"chat_id": ChatIDValue(chatID), "message_id": messageID}
 	if markup != nil {
 		payload["reply_markup"] = markup
 	}
@@ -205,7 +242,7 @@ func (c *Client) EditMessageReplyMarkup(ctx context.Context, token, chatID strin
 
 // EditMessageText replaces text (HTML) and keyboard of a bot message.
 func (c *Client) EditMessageText(ctx context.Context, token, chatID string, messageID int, text string, markup *InlineKeyboardMarkup) error {
-	payload := map[string]any{"chat_id": chatID, "message_id": messageID, "text": text, "parse_mode": "HTML"}
+	payload := map[string]any{"chat_id": ChatIDValue(chatID), "message_id": messageID, "text": text, "parse_mode": "HTML"}
 	if markup != nil {
 		payload["reply_markup"] = markup
 	}

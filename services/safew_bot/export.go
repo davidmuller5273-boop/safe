@@ -79,6 +79,7 @@ func buildMembersCSV(groups []exportGroup) []byte {
 	var buf bytes.Buffer
 	buf.WriteString("\ufeff")
 	cw := csv.NewWriter(&buf)
+	_ = cw.Write([]string{"说明", "SafeW Bot API 无全量成员列表接口（仅有 getChatAdministrators / getChatMember / getChatMemberCount）。本表=各群管理员（导出时实时拉取）+ 机器人历史记录的全部成员（发言/进退群/chat_member 等）；「群实际人数」来自 getChatMemberCount，与已知成员数可能不一致。", "", "", "", "", "", ""})
 	_ = cw.Write([]string{"群名称", "群ID", "群实际人数", "已知成员数", "身份备注", "用户ID", "用户名", "显示名称"})
 	for _, g := range groups {
 		members := orderMembersForExport(g.Members)
@@ -190,7 +191,7 @@ func (w worker) cmdExportAllMembers(ctx context.Context, token, replyChat string
 			live += g.LiveCount
 		}
 	}
-	caption := fmt.Sprintf("所有群成员导出：%d 个群，已知成员 %d 人（群实际合计 %d 人）。\nBot API 无法列出全部成员，仅包含发过言/进退群/管理员等已记录成员；每群管理员排在最前。", len(groups), known, live)
+	caption := fmt.Sprintf("所有群成员导出：%d 个群，已知成员 %d 人（群实际合计 %d 人）。\nSafeW API 无法列出全部成员；本文件含管理员（实时）+ 机器人曾记录的成员（发言/进退群等），每群管理员排在最前。", len(groups), known, live)
 	name := "群成员导出_" + time.Now().Format("20060102_150405") + ".csv"
 	if _, err := w.client.SendDocument(ctx, token, replyChat, name, buildMembersCSV(groups), caption); err == nil {
 		return nil

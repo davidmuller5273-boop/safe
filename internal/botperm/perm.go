@@ -175,6 +175,17 @@ func (s *Store) ListGroupAdmins(chatID string) ([]domain.BotGroupAdmin, error) {
 	return list, err
 }
 
+// ListGroupAdminsForUser returns every group-admin grant for one user (private menu).
+func (s *Store) ListGroupAdminsForUser(userID string) ([]domain.BotGroupAdmin, error) {
+	userID = strings.TrimSpace(userID)
+	var list []domain.BotGroupAdmin
+	if userID == "" {
+		return list, nil
+	}
+	err := s.DB.Where("user_id = ?", userID).Order("id").Find(&list).Error
+	return list, err
+}
+
 // EnsureGroup registers a group with push disabled by default.
 // Uses MySQL upsert (no-op on conflict) instead of GORM clause.OnConflict
 // DoNothing, which is unreliable on some MySQL/GORM combinations.

@@ -14,13 +14,13 @@ func TestSendMessage(t *testing.T) {
 			t.Errorf("path = %q, want %q", got, want)
 		}
 		var body struct {
-			ChatID string `json:"chat_id"`
+			ChatID any    `json:"chat_id"`
 			Text   string `json:"text"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if body.ChatID != "-100123" || body.Text != "开奖消息" {
+		if body.ChatID != float64(-100123) || body.Text != "开奖消息" {
 			t.Errorf("body = %+v", body)
 		}
 		w.Header().Set("Content-Type", "application/json")

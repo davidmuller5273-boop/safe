@@ -17,8 +17,8 @@ import (
 )
 
 // Panel tiers: the audience a panel was rendered for. Encoded as the first
-// part of callback_data ("s:c6:1") so a refresh keeps the same button set no
-// matter who clicked; the clicker's own permission is always re-checked.
+// part of callback_data ("s:c6:1" or "s#10000852380:c6:1") so a refresh keeps
+// the same button set; the clicker's own permission is always re-checked.
 const (
 	tierSuper = "s" // developer / 超级管理员
 	tierGroup = "g" // 群管理员
@@ -52,15 +52,20 @@ const (
 	levelAnyone permLevel = iota
 	levelGroupAdmin
 	levelSuper
+	levelDeveloper
 	levelInvalid
 )
 
-// actionLevel maps a callback action (without the tier prefix) to the permission it needs.
+// actionLevel maps a callback action (without the tier / target prefix) to the permission it needs.
 // Mirrors the equivalent commands: push / 冠军 / 亚军 = CanTogglePush; 开奖订阅 / 广告状态 = CanControlSensitive.
 func actionLevel(action string) permLevel {
 	switch {
-	case action == "m" || action == "q:lt" || action == "q:ps" || action == "q:ls":
+	case action == "m" || action == "q:lt" || action == "q:ps" || action == "q:ls" || action == "q:lh":
 		return levelAnyone
+	case action == "gs" || strings.HasPrefix(action, "gs:"):
+		return levelSuper
+	case action == "ex":
+		return levelDeveloper
 	case strings.HasPrefix(action, "lh:"):
 		return levelAnyone
 	case action == "p:1" || action == "p:0" || action == "c:0" || action == "r:0" ||
@@ -81,10 +86,12 @@ func actionLevel(action string) permLevel {
 type permChecker interface {
 	CanTogglePush(userID string) (bool, error)
 	CanControlSensitive(userID, chatID string) (bool, error)
+	IsDeveloper(userID string) bool
 }
 
 // authorizeCallback re-checks the clicker's permission with the same helpers the
-// text commands use. Buttons being visible never grants anything.
+// text commands use. chatID must be the *target* group when acting from a DM.
+// Buttons being visible never grants anything.
 func authorizeCallback(perms permChecker, userID, chatID, action string) (bool, error) {
 	switch actionLevel(action) {
 	case levelAnyone:
@@ -93,21 +100,42 @@ func authorizeCallback(perms permChecker, userID, chatID, action string) (bool, 
 		return perms.CanControlSensitive(userID, chatID)
 	case levelSuper:
 		return perms.CanTogglePush(userID)
+	case levelDeveloper:
+		return perms.IsDeveloper(userID), nil
 	}
 	return false, nil
 }
 
-func parseCallbackData(data string) (tier, action string, ok bool) {
-	i := strings.Index(data, ":")
-	if i <= 0 {
-		return "", "", false
+// parseCallbackData accepts:
+//   - tier:action            (in-group panels, e.g. "s:c6:1")
+//   - tier#chatID:action     (DM targeting a group, e.g. "s#10000852380:c6:1")
+func parseCallbackData(data string) (tier, targetChat, action string, ok bool) {
+	if data == "" {
+		return "", "", "", false
 	}
-	tier, action = data[:i], data[i+1:]
+	hash := strings.IndexByte(data, '#')
+	colon := strings.IndexByte(data, ':')
+	if hash > 0 && hash < colon {
+		tier = data[:hash]
+		rest := data[hash+1:]
+		ci := strings.IndexByte(rest, ':')
+		if ci <= 0 {
+			return "", "", "", false
+		}
+		targetChat = rest[:ci]
+		action = rest[ci+1:]
+	} else {
+		if colon <= 0 {
+			return "", "", "", false
+		}
+		tier = data[:colon]
+		action = data[colon+1:]
+	}
 	switch tier {
 	case tierSuper, tierGroup, tierUser:
-		return tier, action, action != ""
+		return tier, targetChat, action, action != "" && (hash <= 0 || targetChat != "")
 	}
-	return "", "", false
+	return "", "", "", false
 }
 
 // panelState is what the buttons display (✅ on enabled modes).
@@ -119,8 +147,21 @@ type panelState struct {
 	SubscribedCnt int
 }
 
+// namedGroup is a short label for private group-pick / admin-group buttons.
+type namedGroup struct {
+	ChatID, Title string
+}
+
 func btn(tier, text, action string) safew.InlineKeyboardButton {
-	return safew.InlineKeyboardButton{Text: text, CallbackData: tier + ":" + action}
+	return btnScoped(tier, "", text, action)
+}
+
+func btnScoped(tier, targetChat, text, action string) safew.InlineKeyboardButton {
+	data := tier + ":" + action
+	if targetChat != "" {
+		data = tier + "#" + targetChat + ":" + action
+	}
+	return safew.InlineKeyboardButton{Text: text, CallbackData: data}
 }
 
 func check(on bool, label string) string {
@@ -137,18 +178,34 @@ func flip(on bool) string {
 	return "1"
 }
 
-// panelKeyboard builds the main inline panel for a tier. Ordinary users only
-// get query buttons; control buttons appear only for roles allowed to use them.
-func panelKeyboard(tier string, st panelState) *safew.InlineKeyboardMarkup {
+func truncateBtnLabel(s string, maxRunes int) string {
+	r := []rune(strings.TrimSpace(s))
+	if len(r) <= maxRunes {
+		return string(r)
+	}
+	return string(r[:maxRunes-1]) + "…"
+}
+
+// panelKeyboard builds the main inline panel for a tier.
+// targetChatID non-empty embeds that chat into every callback (DM remote control).
+// When !st.IsGroup the private home query row is returned (callers may append more).
+func panelKeyboard(tier string, st panelState, targetChatID string) *safew.InlineKeyboardMarkup {
+	mk := func(text, action string) safew.InlineKeyboardButton {
+		return btnScoped(tier, targetChatID, text, action)
+	}
 	var rows [][]safew.InlineKeyboardButton
 	if !st.IsGroup {
-		rows = append(rows, []safew.InlineKeyboardButton{btn(tier, "🎟 查看开奖", "q:lt")})
+		rows = append(rows, []safew.InlineKeyboardButton{
+			mk("🎟 查看开奖", "q:lt"),
+			mk("📜 开奖历史", "q:lh"),
+			mk("🔄 刷新", "m"),
+		})
 		return &safew.InlineKeyboardMarkup{InlineKeyboard: rows}
 	}
 	rows = append(rows, []safew.InlineKeyboardButton{
-		btn(tier, "🎟 查看开奖", "q:lt"),
-		btn(tier, "📊 推送状态", "q:ps"),
-		btn(tier, "🎫 本群订阅", "q:ls"),
+		mk("🎟 查看开奖", "q:lt"),
+		mk("📊 推送状态", "q:ps"),
+		mk("🎫 本群订阅", "q:ls"),
 	})
 	if tier == tierSuper {
 		push := "⛔ 推送已关（点此开启）"
@@ -156,16 +213,16 @@ func panelKeyboard(tier string, st panelState) *safew.InlineKeyboardMarkup {
 			push = "✅ 推送已开（点此关闭）"
 		}
 		rows = append(rows,
-			[]safew.InlineKeyboardButton{btn(tier, push, "p:"+flip(st.Push))},
+			[]safew.InlineKeyboardButton{mk(push, "p:"+flip(st.Push))},
 			[]safew.InlineKeyboardButton{
-				btn(tier, check(st.C6, "冠军6码"), "c6:"+flip(st.C6)),
-				btn(tier, check(st.C7, "冠军7码"), "c7:"+flip(st.C7)),
-				btn(tier, "关闭冠军", "c:0"),
+				mk(check(st.C6, "冠军6码"), "c6:"+flip(st.C6)),
+				mk(check(st.C7, "冠军7码"), "c7:"+flip(st.C7)),
+				mk("关闭冠军", "c:0"),
 			},
 			[]safew.InlineKeyboardButton{
-				btn(tier, check(st.R6, "亚军6码"), "r6:"+flip(st.R6)),
-				btn(tier, check(st.R7, "亚军7码"), "r7:"+flip(st.R7)),
-				btn(tier, "关闭亚军", "r:0"),
+				mk(check(st.R6, "亚军6码"), "r6:"+flip(st.R6)),
+				mk(check(st.R7, "亚军7码"), "r7:"+flip(st.R7)),
+				mk("关闭亚军", "r:0"),
 			},
 		)
 	}
@@ -177,29 +234,88 @@ func panelKeyboard(tier string, st panelState) *safew.InlineKeyboardMarkup {
 			subAction = "lb:0"
 		}
 		rows = append(rows,
-			[]safew.InlineKeyboardButton{btn(tier, sub, subAction), btn(tier, "⚙️ 选择彩种", "ls")},
-			[]safew.InlineKeyboardButton{btn(tier, "📢 广告状态", "ad"), btn(tier, "🔄 刷新", "m")},
+			[]safew.InlineKeyboardButton{mk(sub, subAction), mk("⚙️ 选择彩种", "ls")},
+			[]safew.InlineKeyboardButton{mk("📢 广告状态", "ad"), mk("🔄 刷新", "m")},
 		)
 	} else {
-		rows = append(rows, []safew.InlineKeyboardButton{btn(tier, "🔄 刷新", "m")})
+		rows = append(rows, []safew.InlineKeyboardButton{mk("🔄 刷新", "m")})
+	}
+	if targetChatID != "" && tier == tierSuper {
+		rows = append(rows, []safew.InlineKeyboardButton{btn(tier, "⬅️ 重选群组", "gs")})
+	} else if targetChatID != "" && tier == tierGroup {
+		rows = append(rows, []safew.InlineKeyboardButton{btn(tier, "⬅️ 返回菜单", "m")})
 	}
 	return &safew.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
-// lotterySubKeyboard mirrors lottery_subscription_keyboard (✅/❌ per game).
-func lotterySubKeyboard(tier string, subscribed map[string]bool) *safew.InlineKeyboardMarkup {
-	all := "✅ 开启全部播报"
-	if len(subscribed) > 0 {
-		all = "⛔ 关闭全部播报"
+// privateHomeKeyboard is the DM /菜单 board: query row + role extras.
+func privateHomeKeyboard(tier string, adminGroups []namedGroup, showGroupPick, showExport bool) *safew.InlineKeyboardMarkup {
+	base := panelKeyboard(tier, panelState{IsGroup: false}, "")
+	rows := append([][]safew.InlineKeyboardButton{}, base.InlineKeyboard...)
+	if showExport {
+		rows = append(rows, []safew.InlineKeyboardButton{btn(tier, "📤 导出所有群成员", "ex")})
 	}
-	rows := [][]safew.InlineKeyboardButton{{btn(tier, all, "la")}}
+	if showGroupPick {
+		rows = append(rows, []safew.InlineKeyboardButton{btn(tier, "📂 群组选择", "gs")})
+	}
+	for _, g := range adminGroups {
+		label := g.Title
+		if label == "" {
+			label = g.ChatID
+		}
+		rows = append(rows, []safew.InlineKeyboardButton{
+			btnScoped(tier, g.ChatID, "群·"+truncateBtnLabel(label, 28), "m"),
+		})
+	}
+	return &safew.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+const groupPickPageSize = 8
+
+// groupPickKeyboard lists known groups for developer/super DM control.
+func groupPickKeyboard(tier string, groups []namedGroup, page int) *safew.InlineKeyboardMarkup {
+	if page < 0 {
+		page = 0
+	}
+	start := page * groupPickPageSize
+	var rows [][]safew.InlineKeyboardButton
+	if start >= len(groups) {
+		rows = append(rows, []safew.InlineKeyboardButton{btn(tier, "（无更多群）", "gs")})
+	} else {
+		end := start + groupPickPageSize
+		if end > len(groups) {
+			end = len(groups)
+		}
+		for _, g := range groups[start:end] {
+			label := g.Title
+			if label == "" {
+				label = "(无标题)"
+			}
+			rows = append(rows, []safew.InlineKeyboardButton{
+				btnScoped(tier, g.ChatID, truncateBtnLabel(label, 40)+" · "+g.ChatID, "m"),
+			})
+		}
+	}
+	var nav []safew.InlineKeyboardButton
+	if page > 0 {
+		nav = append(nav, btn(tier, "上一页", fmt.Sprintf("gs:%d", page-1)))
+	}
+	if (page+1)*groupPickPageSize < len(groups) {
+		nav = append(nav, btn(tier, "下一页", fmt.Sprintf("gs:%d", page+1)))
+	}
+	if len(nav) > 0 {
+		rows = append(rows, nav)
+	}
+	rows = append(rows, []safew.InlineKeyboardButton{btn(tier, "⬅️ 返回菜单", "m")})
+	return &safew.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// historyPickKeyboard lets anyone pick a game for /开奖历史 from the private menu.
+func historyPickKeyboard(tier string) *safew.InlineKeyboardMarkup {
+	var rows [][]safew.InlineKeyboardButton
 	var line []safew.InlineKeyboardButton
 	for _, code := range lotterybroadcast.GameOrder {
-		mark := "❌"
-		if subscribed[code] {
-			mark = "✅"
-		}
-		line = append(line, btn(tier, mark+" "+lotterybroadcast.Games[code].Name, "lt:"+code))
+		line = append(line, btn(tier, lotterybroadcast.Games[code].Name, "lh:"+code+":0"))
 		if len(line) == 2 {
 			rows = append(rows, line)
 			line = nil
@@ -209,6 +325,35 @@ func lotterySubKeyboard(tier string, subscribed map[string]bool) *safew.InlineKe
 		rows = append(rows, line)
 	}
 	rows = append(rows, []safew.InlineKeyboardButton{btn(tier, "⬅️ 返回菜单", "m")})
+	return &safew.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// lotterySubKeyboard mirrors lottery_subscription_keyboard (✅/❌ per game).
+func lotterySubKeyboard(tier, targetChatID string, subscribed map[string]bool) *safew.InlineKeyboardMarkup {
+	mk := func(text, action string) safew.InlineKeyboardButton {
+		return btnScoped(tier, targetChatID, text, action)
+	}
+	all := "✅ 开启全部播报"
+	if len(subscribed) > 0 {
+		all = "⛔ 关闭全部播报"
+	}
+	rows := [][]safew.InlineKeyboardButton{{mk(all, "la")}}
+	var line []safew.InlineKeyboardButton
+	for _, code := range lotterybroadcast.GameOrder {
+		mark := "❌"
+		if subscribed[code] {
+			mark = "✅"
+		}
+		line = append(line, mk(mark+" "+lotterybroadcast.Games[code].Name, "lt:"+code))
+		if len(line) == 2 {
+			rows = append(rows, line)
+			line = nil
+		}
+	}
+	if len(line) > 0 {
+		rows = append(rows, line)
+	}
+	rows = append(rows, []safew.InlineKeyboardButton{mk("⬅️ 返回菜单", "m")})
 	return &safew.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
@@ -225,12 +370,11 @@ func isGroupChat(chat safew.Chat) bool {
 	return t == "" && strings.HasPrefix(chat.IDString(), "-")
 }
 
-func (w worker) panelStateFor(chat safew.Chat) panelState {
-	st := panelState{IsGroup: isGroupChat(chat)}
-	if !st.IsGroup {
+func (w worker) panelStateForChat(chatID string, asGroup bool) panelState {
+	st := panelState{IsGroup: asGroup}
+	if !asGroup {
 		return st
 	}
-	chatID := chat.IDString()
 	if s, err := w.perms.GetGroupSettings(chatID); err == nil {
 		st.Push, st.C6, st.C7, st.R6, st.R7 = s.PushEnabled, s.Enable6Code, s.Enable7Code, s.EnableRunnerUp6Code, s.EnableRunnerUp7Code
 	}
@@ -242,11 +386,96 @@ func (w worker) panelStateFor(chat safew.Chat) panelState {
 	return st
 }
 
+// elevatePrivateRole promotes a DM caller who is a group admin of any group so
+// the private /菜单 shows group-admin controls (RoleInChat alone would be none).
+func (w worker) elevatePrivateRole(userID string, chat safew.Chat, role string) string {
+	if isGroupChat(chat) || role != botperm.RoleNone {
+		return role
+	}
+	list, err := w.perms.ListGroupAdminsForUser(userID)
+	if err == nil && len(list) > 0 {
+		return botperm.RoleGroupAdmin
+	}
+	return role
+}
+
+func (w worker) listNamedGroupsForPick() ([]namedGroup, error) {
+	const pageSize = 500
+	var out []namedGroup
+	for offset := 0; ; offset += pageSize {
+		rows, total, err := w.perms.ListGroups(offset, pageSize)
+		if err != nil {
+			return nil, err
+		}
+		for _, g := range rows {
+			if isPrivateGroupRow(g) {
+				continue
+			}
+			out = append(out, namedGroup{ChatID: g.ChatID, Title: g.Title})
+		}
+		if len(rows) < pageSize || int64(offset+pageSize) >= total {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (w worker) listAdminGroupsForUser(userID string) ([]namedGroup, error) {
+	list, err := w.perms.ListGroupAdminsForUser(userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]namedGroup, 0, len(list))
+	seen := map[string]bool{}
+	for _, a := range list {
+		if a.ChatID == "" || seen[a.ChatID] {
+			continue
+		}
+		seen[a.ChatID] = true
+		title := ""
+		if s, err := w.perms.GetGroupSettings(a.ChatID); err == nil {
+			title = s.Title
+			if isPrivateGroupRow(s) {
+				continue
+			}
+		}
+		out = append(out, namedGroup{ChatID: a.ChatID, Title: title})
+	}
+	return out, nil
+}
+
+func (w worker) privateHomeMarkup(tier, userID, role string) *safew.InlineKeyboardMarkup {
+	showExport := role == botperm.RoleDeveloper
+	showGroupPick := tier == tierSuper
+	var adminGroups []namedGroup
+	if tier == tierGroup {
+		adminGroups, _ = w.listAdminGroupsForUser(userID)
+	}
+	return privateHomeKeyboard(tier, adminGroups, showGroupPick, showExport)
+}
+
+func groupPanelText(tier, targetChatID, title string) string {
+	label := strings.TrimSpace(title)
+	if label == "" {
+		label = "(无标题)"
+	}
+	head := fmt.Sprintf("📖 群组控制面板\n群：%s\nID：%s\n\n", label, targetChatID)
+	return head + helpForRole(roleForTier(tier))
+}
+
 // sendPanel replies with the role-specific help text plus the inline panel.
-func (w worker) sendPanel(ctx context.Context, token string, chat safew.Chat, role string) error {
+func (w worker) sendPanel(ctx context.Context, token string, chat safew.Chat, userID, role string) error {
+	role = w.elevatePrivateRole(userID, chat, role)
 	tier := tierForRole(role)
-	_, err := w.client.SendMessageEx(ctx, token, chat.IDString(), html.EscapeString(helpForRole(role)),
-		safew.SendOptions{ReplyMarkup: panelKeyboard(tier, w.panelStateFor(chat))})
+	var markup *safew.InlineKeyboardMarkup
+	text := helpForRole(role)
+	if isGroupChat(chat) {
+		markup = panelKeyboard(tier, w.panelStateForChat(chat.IDString(), true), "")
+	} else {
+		markup = w.privateHomeMarkup(tier, userID, role)
+	}
+	_, err := w.client.SendMessageEx(ctx, token, chat.IDString(), html.EscapeString(text),
+		safew.SendOptions{ReplyMarkup: markup})
 	return err
 }
 
@@ -275,16 +504,20 @@ func (w worker) handleCallback(ctx context.Context, botConfig systemconfig.SafeW
 		answer("该按钮已失效，请重新发送 /菜单", false)
 		return
 	}
-	tier, action, ok := parseCallbackData(cq.Data)
+	tier, targetChat, action, ok := parseCallbackData(cq.Data)
 	if !ok || actionLevel(action) == levelInvalid {
 		answer("该按钮已失效，请重新发送 /菜单", false)
 		return
 	}
-	chat := cq.Message.Chat
-	chatID := chat.IDString()
+	msgChat := cq.Message.Chat
+	msgChatID := msgChat.IDString()
 	userID := cq.From.IDString()
-	_ = w.perms.EnsureGroup(chatID)
-	allowed, err := authorizeCallback(w.perms, userID, chatID, action)
+	authChat := msgChatID
+	if targetChat != "" {
+		authChat = targetChat
+	}
+	_ = w.perms.EnsureGroup(authChat)
+	allowed, err := authorizeCallback(w.perms, userID, authChat, action)
 	if err != nil {
 		answer(shortErr(err), true)
 		return
@@ -293,14 +526,14 @@ func (w worker) handleCallback(ctx context.Context, botConfig systemconfig.SafeW
 		answer("权限不足", false)
 		return
 	}
-	toast, alert, view, err := w.runPanelAction(ctx, token, chat, cq.Message.MessageID, userID, tier, action)
+	toast, alert, view, err := w.runPanelAction(ctx, token, msgChat, targetChat, cq.Message.MessageID, userID, tier, action)
 	if err != nil {
-		log.Printf("按钮操作失败 chat=%s data=%s: %v", chatID, cq.Data, err)
+		log.Printf("按钮操作失败 chat=%s target=%s data=%s: %v", msgChatID, targetChat, cq.Data, err)
 		answer(shortErr(err), true)
 		return
 	}
 	answer(toast, alert)
-	w.refreshPanel(ctx, token, chat, cq.Message.MessageID, tier, view)
+	w.refreshPanel(ctx, token, msgChat, cq.Message.MessageID, userID, tier, targetChat, view)
 }
 
 func shortErr(err error) string {
@@ -315,34 +548,95 @@ func shortErr(err error) string {
 type panelView int
 
 const (
-	viewKeep panelView = iota // main panel: refresh keyboard only
-	viewMain                  // switch text + keyboard back to the main panel
-	viewSubs                  // per-game subscription menu
-	viewNone                  // leave the message untouched
+	viewKeep      panelView = iota // main panel: refresh keyboard only
+	viewMain                       // switch text + keyboard back to the main panel
+	viewSubs                       // per-game subscription menu
+	viewHistPick                   // private 开奖历史 game picker
+	viewGroupPick                  // developer/super 群组选择
+	viewNone                       // leave the message untouched
 )
 
-func (w worker) refreshPanel(ctx context.Context, token string, chat safew.Chat, messageID int, tier string, view panelView) {
-	chatID := chat.IDString()
+func (w worker) refreshPanel(ctx context.Context, token string, msgChat safew.Chat, messageID int, userID, tier, targetChat string, view panelView) {
+	msgChatID := msgChat.IDString()
+	inGroup := isGroupChat(msgChat)
 	var err error
 	switch view {
 	case viewKeep:
-		err = w.client.EditMessageReplyMarkup(ctx, token, chatID, messageID, panelKeyboard(tier, w.panelStateFor(chat)))
+		if targetChat != "" {
+			err = w.client.EditMessageReplyMarkup(ctx, token, msgChatID, messageID,
+				panelKeyboard(tier, w.panelStateForChat(targetChat, true), targetChat))
+		} else if inGroup {
+			err = w.client.EditMessageReplyMarkup(ctx, token, msgChatID, messageID,
+				panelKeyboard(tier, w.panelStateForChat(msgChatID, true), ""))
+		} else {
+			role := roleForTier(tier)
+			if tier == tierSuper {
+				// distinguish developer export button via IsDeveloper
+				if w.perms.IsDeveloper(userID) {
+					role = botperm.RoleDeveloper
+				}
+			}
+			err = w.client.EditMessageReplyMarkup(ctx, token, msgChatID, messageID, w.privateHomeMarkup(tier, userID, role))
+		}
 	case viewMain:
-		err = w.client.EditMessageText(ctx, token, chatID, messageID, html.EscapeString(helpForRole(roleForTier(tier))), panelKeyboard(tier, w.panelStateFor(chat)))
+		if targetChat != "" {
+			title := ""
+			if s, e := w.perms.GetGroupSettings(targetChat); e == nil {
+				title = s.Title
+			}
+			err = w.client.EditMessageText(ctx, token, msgChatID, messageID,
+				html.EscapeString(groupPanelText(tier, targetChat, title)),
+				panelKeyboard(tier, w.panelStateForChat(targetChat, true), targetChat))
+		} else if inGroup {
+			err = w.client.EditMessageText(ctx, token, msgChatID, messageID,
+				html.EscapeString(helpForRole(roleForTier(tier))),
+				panelKeyboard(tier, w.panelStateForChat(msgChatID, true), ""))
+		} else {
+			role := roleForTier(tier)
+			if tier == tierSuper && w.perms.IsDeveloper(userID) {
+				role = botperm.RoleDeveloper
+			}
+			err = w.client.EditMessageText(ctx, token, msgChatID, messageID,
+				html.EscapeString(helpForRole(role)),
+				w.privateHomeMarkup(tier, userID, role))
+		}
 	case viewSubs:
-		set := w.subscribedSet(chatID)
-		err = w.client.EditMessageText(ctx, token, chatID, messageID, html.EscapeString(lotterySubText(set)), lotterySubKeyboard(tier, set))
+		opChat := msgChatID
+		if targetChat != "" {
+			opChat = targetChat
+		}
+		set := w.subscribedSet(opChat)
+		err = w.client.EditMessageText(ctx, token, msgChatID, messageID, html.EscapeString(lotterySubText(set)), lotterySubKeyboard(tier, targetChat, set))
+	case viewHistPick:
+		err = w.client.EditMessageText(ctx, token, msgChatID, messageID,
+			html.EscapeString("📜 开奖历史\n\n请选择彩种："), historyPickKeyboard(tier))
+	case viewGroupPick:
+		page := 0
+		groups, gerr := w.listNamedGroupsForPick()
+		if gerr != nil {
+			log.Printf("群组选择列表失败: %v", gerr)
+		}
+		err = w.client.EditMessageText(ctx, token, msgChatID, messageID,
+			html.EscapeString("📂 群组选择\n\n点选一个群以打开该群的控制面板（推送/冠军/亚军/订阅/广告）："),
+			groupPickKeyboard(tier, groups, page))
 	}
 	if err != nil && !safew.IsNotModified(err) {
-		log.Printf("刷新按钮面板失败 chat=%s: %v", chatID, err)
+		log.Printf("刷新按钮面板失败 chat=%s: %v", msgChatID, err)
 	}
 }
 
 var errGroupOnly = errors.New("开奖播报只能订阅到群组")
 
 // runPanelAction executes an authorized action and returns the toast text.
-func (w worker) runPanelAction(ctx context.Context, token string, chat safew.Chat, messageID int, userID, tier, action string) (toast string, alert bool, view panelView, err error) {
-	chatID := chat.IDString()
+// targetChat is the group id from callback_data when acting from a DM; empty means the message chat.
+func (w worker) runPanelAction(ctx context.Context, token string, msgChat safew.Chat, targetChat string, messageID int, userID, tier, action string) (toast string, alert bool, view panelView, err error) {
+	msgChatID := msgChat.IDString()
+	opChatID := msgChatID
+	if targetChat != "" {
+		opChatID = targetChat
+	}
+	opIsGroup := targetChat != "" || isGroupChat(msgChat)
+
 	if strings.HasPrefix(action, "lh:") {
 		parts := strings.Split(action, ":")
 		page, perr := 0, error(nil)
@@ -352,80 +646,104 @@ func (w worker) runPanelAction(ctx context.Context, token string, chat safew.Cha
 		if len(parts) != 3 || perr != nil || w.lb == nil {
 			return "无效页码", false, viewNone, nil
 		}
-		return "", false, viewNone, w.editHistoryPage(ctx, token, chatID, messageID, parts[1], page)
+		return "", false, viewNone, w.editHistoryPage(ctx, token, msgChatID, messageID, parts[1], page)
+	}
+	if action == "gs" || strings.HasPrefix(action, "gs:") {
+		if strings.HasPrefix(action, "gs:") {
+			page, _ := strconv.Atoi(strings.TrimPrefix(action, "gs:"))
+			groups, gerr := w.listNamedGroupsForPick()
+			if gerr != nil {
+				return "", false, viewNone, gerr
+			}
+			if err := w.client.EditMessageText(ctx, token, msgChatID, messageID,
+				html.EscapeString("📂 群组选择\n\n点选一个群以打开该群的控制面板（推送/冠军/亚军/订阅/广告）："),
+				groupPickKeyboard(tier, groups, page)); err != nil && !safew.IsNotModified(err) {
+				return "", false, viewNone, err
+			}
+			return "请选择群组", false, viewNone, nil
+		}
+		return "请选择群组", false, viewGroupPick, nil
 	}
 	switch action {
 	case "m":
+		if targetChat != "" {
+			return "已打开群面板", false, viewMain, nil
+		}
 		return "已刷新", false, viewMain, nil
 	case "q:lt":
 		if w.lb == nil {
 			return "", false, viewNone, errors.New("开奖播报未启用")
 		}
-		go w.runAsync(ctx, token, chatID, func() error { return w.lotteryQuery(ctx, token, chat, "") })
+		go w.runAsync(ctx, token, msgChatID, func() error { return w.lotteryQuery(ctx, token, msgChat, "") })
 		return "正在查询最新开奖…", false, viewNone, nil
+	case "q:lh":
+		return "请选择彩种", false, viewHistPick, nil
 	case "q:ps":
-		return w.statusSummary(chatID), true, viewKeep, nil
+		return w.statusSummary(opChatID), true, viewKeep, nil
 	case "q:ls":
-		return w.subscriptionSummary(chatID), true, viewKeep, nil
+		return w.subscriptionSummary(opChatID), true, viewKeep, nil
+	case "ex":
+		go w.runAsync(ctx, token, msgChatID, func() error { return w.cmdExportAllMembers(ctx, token, msgChatID) })
+		return "正在导出所有群成员…", false, viewNone, nil
 	case "p:1", "p:0":
-		_, toast, err := w.applyPush(chatID, action == "p:1")
+		_, toast, err := w.applyPush(opChatID, action == "p:1")
 		return toast, false, viewKeep, err
 	case "c6:1", "c6:0", "c7:1", "c7:0":
 		size := 6
 		if action[1] == '7' {
 			size = 7
 		}
-		_, toast, err := w.applyCodeMode(chatID, size, strings.HasSuffix(action, ":1"))
+		_, toast, err := w.applyCodeMode(opChatID, size, strings.HasSuffix(action, ":1"))
 		return toast, false, viewKeep, err
 	case "r6:1", "r6:0", "r7:1", "r7:0":
 		size := 6
 		if action[1] == '7' {
 			size = 7
 		}
-		_, toast, err := w.applyRunnerUpCodeMode(chatID, size, strings.HasSuffix(action, ":1"))
+		_, toast, err := w.applyRunnerUpCodeMode(opChatID, size, strings.HasSuffix(action, ":1"))
 		return toast, false, viewKeep, err
 	case "c:0":
-		if _, _, err := w.applyCodeMode(chatID, 6, false); err != nil {
+		if _, _, err := w.applyCodeMode(opChatID, 6, false); err != nil {
 			return "", false, viewKeep, err
 		}
-		if _, _, err := w.applyCodeMode(chatID, 7, false); err != nil {
+		if _, _, err := w.applyCodeMode(opChatID, 7, false); err != nil {
 			return "", false, viewKeep, err
 		}
 		return "已关闭冠军推送", false, viewKeep, nil
 	case "r:0":
-		if _, _, err := w.applyRunnerUpCodeMode(chatID, 6, false); err != nil {
+		if _, _, err := w.applyRunnerUpCodeMode(opChatID, 6, false); err != nil {
 			return "", false, viewKeep, err
 		}
-		if _, _, err := w.applyRunnerUpCodeMode(chatID, 7, false); err != nil {
+		if _, _, err := w.applyRunnerUpCodeMode(opChatID, 7, false); err != nil {
 			return "", false, viewKeep, err
 		}
 		return "已关闭亚军推送", false, viewKeep, nil
 	case "ad":
-		s, err := ads.LoadForChat(w.db, chatID)
+		s, err := ads.LoadForChat(w.db, opChatID)
 		if err != nil {
 			return "", false, viewKeep, err
 		}
 		body := fmt.Sprintf("scope=%s\nprefix:\n%s\n\nsuffix:\n%s", s.Scope, emptyMark(s.PrefixAd), emptyMark(s.SuffixAd))
-		if err := w.reply(ctx, token, chatID, body); err != nil {
+		if err := w.reply(ctx, token, msgChatID, body); err != nil {
 			return "", false, viewKeep, err
 		}
 		return "已发送广告状态", false, viewKeep, nil
 	}
-	// lottery subscription actions (group only)
+	// lottery subscription actions (group only — including DM with target chat)
 	if w.lb == nil {
 		return "", false, viewNone, errors.New("开奖播报未启用")
 	}
-	if !isGroupChat(chat) {
+	if !opIsGroup {
 		return "", false, viewNone, errGroupOnly
 	}
 	switch {
 	case action == "lb:1":
-		if err := w.lb.store.AddSubscription(chatID, "all", userID); err != nil {
+		if err := w.lb.store.AddSubscription(opChatID, "all", userID); err != nil {
 			return "", false, viewKeep, err
 		}
 		return "✅ 已订阅全部彩种，新期开奖后自动播报并置顶", false, viewKeep, nil
 	case action == "lb:0":
-		n, err := w.lb.store.RemoveSubscription(chatID, "")
+		n, err := w.lb.store.RemoveSubscription(opChatID, "")
 		if err != nil {
 			return "", false, viewKeep, err
 		}
@@ -433,18 +751,18 @@ func (w worker) runPanelAction(ctx context.Context, token string, chat safew.Cha
 	case action == "ls":
 		return "请选择要订阅的彩种", false, viewSubs, nil
 	case action == "la":
-		set := w.subscribedSet(chatID)
+		set := w.subscribedSet(opChatID)
 		var codes []string
 		if len(set) == 0 {
 			codes = []string{"all"}
 		}
-		if err := w.lb.store.SetSubscribedCodes(chatID, codes, userID); err != nil {
+		if err := w.lb.store.SetSubscribedCodes(opChatID, codes, userID); err != nil {
 			return "", false, viewSubs, err
 		}
 		return "开奖订阅已更新", false, viewSubs, nil
 	case strings.HasPrefix(action, "lt:"):
 		code := strings.TrimPrefix(action, "lt:")
-		set := w.subscribedSet(chatID)
+		set := w.subscribedSet(opChatID)
 		if set[code] {
 			delete(set, code)
 		} else {
@@ -454,7 +772,7 @@ func (w worker) runPanelAction(ctx context.Context, token string, chat safew.Cha
 		for c := range set {
 			codes = append(codes, c)
 		}
-		if err := w.lb.store.SetSubscribedCodes(chatID, codes, userID); err != nil {
+		if err := w.lb.store.SetSubscribedCodes(opChatID, codes, userID); err != nil {
 			return "", false, viewSubs, err
 		}
 		return "开奖订阅已更新", false, viewSubs, nil
