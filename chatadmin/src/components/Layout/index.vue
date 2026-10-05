@@ -24,6 +24,7 @@
         <template v-else>
           <el-menu-item index="/lottery/types"><el-icon><Tickets /></el-icon><template #title>彩种管理</template></el-menu-item>
           <el-menu-item index="/lottery/draw-records"><el-icon><List /></el-icon><template #title>开奖记录</template></el-menu-item>
+          <el-menu-item index="/lottery/broadcast"><el-icon><Bell /></el-icon><template #title>开奖播报</template></el-menu-item>
         </template>
       </el-menu>
     </el-aside>
@@ -80,7 +81,7 @@
 import { computed, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
-import { ArrowDown, DataAnalysis, Expand, Fold, Key, List, Lock, Setting, Tickets, UserFilled } from '@element-plus/icons-vue'
+import { ArrowDown, Bell, DataAnalysis, Expand, Fold, Key, List, Lock, Setting, Tickets, UserFilled } from '@element-plus/icons-vue'
 import { useUserStore } from '@/store/user'
 import { changePassword } from '@/api'
 

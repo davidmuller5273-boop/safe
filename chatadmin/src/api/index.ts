@@ -1,5 +1,5 @@
 import request from '@/utils/request'
-import type { Admin, ApiResponse, DrawRecord, LotteryType, PageData, Permission, Role, SystemConfig } from '@/types'
+import type { Admin, ApiResponse, DrawRecord, LotteryBroadcastOverview, LotteryType, PageData, Permission, Role, SystemConfig } from '@/types'
 export const login=(data:{username:string;password:string})=>request.post<any,ApiResponse<{token:string;admin:Admin}>>('/admin/login',data)
 export const current=()=>request.get<any,ApiResponse<Admin>>('/admin/current')
 export const changePassword=(data:{current_password:string;new_password:string;confirm_password:string})=>request.post('/admin/password',data)
@@ -19,3 +19,6 @@ export const deleteLotteryType=(id:number)=>request.delete(`/admin/lottery-types
 export const getDrawRecords=(params:{page:number;page_size:number;lottery_type_id?:number;issue_number?:string})=>request.get<any,ApiResponse<PageData<DrawRecord>>>('/admin/draw-records',{params})
 export const getSystemConfig=()=>request.get<any,ApiResponse<SystemConfig>>('/admin/system-config')
 export const updateSafeWBot=(data:{token:string;chat_ids:string[]})=>request.put('/admin/system-config/safew-bot',data)
+export const getLotteryBroadcast=()=>request.get<any,ApiResponse<LotteryBroadcastOverview>>('/admin/lottery-broadcast')
+export const updateLotteryBroadcastSwitches=(data:{query_enabled?:boolean;broadcast_enabled?:boolean;with_ads?:boolean;games?:Record<string,boolean>})=>request.put('/admin/lottery-broadcast/switches',data)
+export const deleteLotteryBroadcastSubscription=(data:{chat_id:string;selector:string})=>request.delete('/admin/lottery-broadcast/subscriptions',{data})

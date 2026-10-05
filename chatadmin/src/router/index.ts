@@ -17,6 +17,7 @@ const router = createRouter({
         { path: 'system-config', component: () => import('@/views/system-config/index.vue'), meta: { title: '系统配置' } },
         { path: 'lottery/types', component: () => import('@/views/lottery/type/index.vue'), meta: { title: '彩种管理' } },
         { path: 'lottery/draw-records', component: () => import('@/views/lottery/draw-record/index.vue'), meta: { title: '开奖记录' } },
+        { path: 'lottery/broadcast', component: () => import('@/views/lottery/broadcast/index.vue'), meta: { title: '开奖播报' } },
       ],
     },
   ],
