@@ -471,6 +471,16 @@ func (s *Store) FinishOutbox(id uint64, success bool, messageID int64, pinned bo
 		trunc(errText, 500), maxAttempts, id).Error
 }
 
+// DisableChat disables all subscriptions of an unreachable chat and fails its
+// remaining pending outbox rows. Returns the number of outbox rows failed.
+func (s *Store) DisableChat(chatID string) (int64, error) {
+	if err := s.DB.Exec("UPDATE `"+TableSubscriptions+"` SET is_enabled=0 WHERE chat_id = ?", chatID).Error; err != nil {
+		return 0, err
+	}
+	res := s.DB.Exec("UPDATE `"+TableOutbox+"` SET status='failed', last_error='群不可达，已停用订阅' WHERE chat_id = ? AND status = 'pending'", chatID)
+	return res.RowsAffected, res.Error
+}
+
 // RecentOutbox lists recent broadcasts for the admin page.
 func (s *Store) RecentOutbox(limit int) ([]OutboxItem, error) {
 	if limit <= 0 {

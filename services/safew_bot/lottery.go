@@ -160,6 +160,16 @@ func (w worker) flushLotteryOutbox(ctx context.Context) {
 		}
 		msgID, pinned, err := w.deliverBroadcast(ctx, botConfig.Token, item.ChatID, item.Body, sw.WithAds)
 		if err != nil {
+			if safew.IsPermanentChatError(err) {
+				log.Printf("开奖播报群不可达（永久错误），标记失败并停用该群订阅 chat=%s game=%s issue=%s: %v", item.ChatID, item.GameCode, item.Issue, err)
+				_ = w.lb.store.FinishOutbox(item.ID, false, 0, false, err.Error(), 0)
+				if n, derr := w.lb.store.DisableChat(item.ChatID); derr != nil {
+					log.Printf("停用开奖播报订阅失败 chat=%s: %v", item.ChatID, derr)
+				} else if n > 0 {
+					log.Printf("已停用开奖播报订阅并作废待发 %d 条 chat=%s", n, item.ChatID)
+				}
+				continue
+			}
 			log.Printf("开奖播报发送失败 chat=%s game=%s issue=%s: %v", item.ChatID, item.GameCode, item.Issue, err)
 			_ = w.lb.store.FinishOutbox(item.ID, false, 0, false, err.Error(), lotteryMaxAttempts)
 			continue

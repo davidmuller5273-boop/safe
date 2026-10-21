@@ -23,7 +23,14 @@ import (
 	"gorm.io/gorm"
 )
 
-const retryInterval = 3 * time.Second
+const (
+	retryInterval = 3 * time.Second
+	// maxIssueAttempts bounds how often a whole issue is retried for internal
+	// (DB/Redis) errors before it is dropped so the queue never stalls.
+	maxIssueAttempts = 5
+	// maxSendAttempts bounds per-group retries for transient send errors.
+	maxSendAttempts = 3
+)
 
 func Run() error {
 	cfg, err := config.Load()
@@ -93,7 +100,7 @@ func (w worker) runQueue(ctx context.Context) error {
 			continue
 		}
 
-		for {
+		for attempt := 1; ; attempt++ {
 			var botConfig systemconfig.SafeW
 			texts, ready, err := w.predictionMessage(message)
 			if err == nil && ready {
@@ -117,7 +124,15 @@ func (w worker) runQueue(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return nil
 			}
-			log.Printf("SafeW 开奖消息发送失败，%s 后重试: issue=%s error=%v", retryInterval, message.IssueNumber, err)
+			if attempt >= maxIssueAttempts {
+				log.Printf("SafeW 开奖消息连续失败 %d 次，放弃本期并继续下一期: issue=%s error=%v", attempt, message.IssueNumber, err)
+				if err := w.queue.Ack(ctx, payload); err != nil {
+					log.Printf("确认消息失败，将在重启后重试: issue=%s error=%v", message.IssueNumber, err)
+					return err
+				}
+				break
+			}
+			log.Printf("SafeW 开奖消息发送失败，%s 后重试(%d/%d): issue=%s error=%v", retryInterval, attempt, maxIssueAttempts, message.IssueNumber, err)
 			if !wait(ctx, retryInterval) {
 				return nil
 			}
@@ -134,6 +149,7 @@ func (w worker) sendToChats(ctx context.Context, botConfig systemconfig.SafeW, m
 		log.Printf("没有已开启推送的群，跳过开奖推送: issue=%s", message.IssueNumber)
 		return nil
 	}
+groups:
 	for _, group := range targets {
 		chatID := group.ChatID
 		jobs := groupPushJobs(group)
@@ -160,8 +176,19 @@ func (w worker) sendToChats(ctx context.Context, botConfig systemconfig.SafeW, m
 			if err != nil {
 				return err
 			}
-			if err := w.client.SendMessage(ctx, botConfig.Token, chatID, outbound); err != nil {
-				return err
+			if err := w.sendWithRetry(ctx, botConfig.Token, chatID, outbound); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if safew.IsPermanentChatError(err) {
+					log.Printf("群不可达（永久错误），跳过并关闭该群推送: chat=%s issue=%s error=%v", chatID, message.IssueNumber, err)
+					if derr := w.perms.SetPushEnabled(chatID, false); derr != nil {
+						log.Printf("关闭群推送失败: chat=%s error=%v", chatID, derr)
+					}
+				} else {
+					log.Printf("群发送多次失败，本期跳过该群: chat=%s issue=%s error=%v", chatID, message.IssueNumber, err)
+				}
+				continue groups
 			}
 			if err := w.queue.MarkSent(ctx, message.RecordID, chatID, kind); err != nil {
 				return err
@@ -169,6 +196,22 @@ func (w worker) sendToChats(ctx context.Context, botConfig systemconfig.SafeW, m
 		}
 	}
 	return nil
+}
+
+// sendWithRetry retries transient errors a few times; permanent chat errors
+// return immediately.
+func (w worker) sendWithRetry(ctx context.Context, token, chatID, text string) error {
+	var err error
+	for i := 1; i <= maxSendAttempts; i++ {
+		err = w.client.SendMessage(ctx, token, chatID, text)
+		if err == nil || safew.IsPermanentChatError(err) || ctx.Err() != nil {
+			return err
+		}
+		if i < maxSendAttempts && !wait(ctx, time.Duration(i)*time.Second) {
+			return ctx.Err()
+		}
+	}
+	return err
 }
 
 type pushJob struct {
