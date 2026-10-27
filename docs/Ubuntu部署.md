@@ -76,7 +76,7 @@ Nginx 参考 `deploy/nginx-safe.conf.example`。**不要**把 3306/6379/8081 暴
 
 自动最优：`/开启自动最优波场单双一分` / `/关闭自动最优波场单双一分`，同样按群开关，使用独立的开关列 `enable_auto_tron` 与发件箱表 `auto_tron_outbox`（启动时自动建/加列），数据来自同机 tg-directory-bot 的 `GET /api/tron-draw/auto-broadcast`（接口不存在或 `enabled=false` 时静默跳过，只记一行日志）。可选环境变量：`AUTO_TRON_ENABLED=0`（整体关闭自动最优，不影响 AI）、`AUTO_TRON_API_URL`、`AUTO_TRON_WITH_ADS`（未设置时沿用 `AI_TRON_*`）。
 
-消息里的「近三小时 最大连中/最大连错」由 tg-directory-bot 返回（`window.max_win` / `window.max_loss`），safe 不自行计算；对方还没升级时这一行不显示。数据契约与降级见 `docs/AI波场单双一分.md`。
+消息里的「近三小时 最大连中/连错」由 tg-directory-bot 返回（`window.max_win` / `window.max_loss`），safe 不自行计算；对方还没升级时这一行不显示。数据契约与降级见 `docs/AI波场单双一分.md`。
 
 ### 更新二进制（示例：源码在 `~/safe`，运行目录 `/root/safex`）
 

@@ -41,7 +41,7 @@ func TestFormatMatchesTemplate(t *testing.T) {
 		"本期预测：🔴双",
 		"<b>📊 周期胜率概览</b>",
 		"180期：49.2%（已预测 8966 期 49.1%）",
-		"近三小时 最大连中 5✅ 最大连错 4❌",
+		"近三小时 最大连中 5✅ 连错 4❌",
 		"走势预测统计网址  188.ms",
 	}, "\n")
 	if got != want {
@@ -244,7 +244,7 @@ func TestFallbackUsesServerProvidedMaxStreak(t *testing.T) {
 	if snap.MaxWin == nil || snap.MaxLoss == nil || *snap.MaxWin != 7 || *snap.MaxLoss != 6 {
 		t.Fatalf("max = %v %v", snap.MaxWin, snap.MaxLoss)
 	}
-	if !strings.Contains(Format(AI, *snap), "近三小时 最大连中 7✅ 最大连错 6❌") {
+	if !strings.Contains(Format(AI, *snap), "近三小时 最大连中 7✅ 连错 6❌") {
 		t.Fatal(Format(AI, *snap))
 	}
 }
@@ -610,7 +610,7 @@ func TestRunnerEndToEndWithFakeHTTPServer(t *testing.T) {
 		t.Fatalf("sent = %v", snd.sent)
 	}
 	msg := snd.sent["-1001"][0]
-	for _, want := range []string{"波场一分单双", "87473360 | ⏳待开奖 | 🔴双 | ⏳", "本期预测：🔴双", "180期：", "近三小时 最大连中 7✅ 最大连错 6❌", "188.ms"} {
+	for _, want := range []string{"波场一分单双", "87473360 | ⏳待开奖 | 🔴双 | ⏳", "本期预测：🔴双", "180期：", "近三小时 最大连中 7✅ 连错 6❌", "188.ms"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("missing %q in:\n%s", want, msg)
 		}
@@ -649,7 +649,7 @@ func TestProposedWithoutMaxStreakOmitsLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(Format(AI, *snap), "近三小时 最大连中 0✅ 最大连错 12❌") {
+	if !strings.Contains(Format(AI, *snap), "近三小时 最大连中 0✅ 连错 12❌") {
 		t.Fatal(Format(AI, *snap))
 	}
 }
@@ -684,7 +684,7 @@ func TestAutoEndpointUsesOwnPathAndTemplate(t *testing.T) {
 		"本期预测：🟢单",
 		"<b>📊 周期胜率概览</b>",
 		"180期：55.6%（已预测 8000 期 50.0%）",
-		"近三小时 最大连中 8✅ 最大连错 5❌",
+		"近三小时 最大连中 8✅ 连错 5❌",
 		"走势预测统计网址  188.ms",
 	}, "\n")
 	if got != want {

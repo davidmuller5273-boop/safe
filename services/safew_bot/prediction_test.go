@@ -235,7 +235,7 @@ func TestBuildPredictionMessageRunnerUpTitle(t *testing.T) {
 	}
 	// Streak lines must keep the exact champion format.
 	for _, body := range []string{body6, body7} {
-		if !strings.Contains(body, "近三小时最大连错❌：") || !strings.Contains(body, "近三小时最大连中✅：") {
+		if !strings.Contains(body, "近三小时连错❌：") || !strings.Contains(body, "近三小时最大连中✅：") {
 			t.Fatalf("streak lines missing:\n%s", body)
 		}
 	}

@@ -155,7 +155,7 @@ func Format(k Kind, s Snapshot) string {
 	b.WriteString("<b>📊 周期胜率概览</b>\n")
 	fmt.Fprintf(&b, "%d期：%s（%s）\n", window, pct(s.Window), overall)
 	if s.MaxWin != nil && s.MaxLoss != nil { // values come from the web program; never computed here
-		fmt.Fprintf(&b, "近三小时 最大连中 %d✅ 最大连错 %d❌\n", *s.MaxWin, *s.MaxLoss)
+		fmt.Fprintf(&b, "近三小时 最大连中 %d✅ 连错 %d❌\n", *s.MaxWin, *s.MaxLoss)
 	}
 	b.WriteString(html.EscapeString(SiteText))
 	return b.String()
