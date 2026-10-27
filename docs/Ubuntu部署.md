@@ -200,9 +200,41 @@ sudo bash deploy/ubuntu/install-backup-hook.sh --test                           
 sudo apt update && sudo apt install -y mysql-client     # 系统用 MariaDB 时：sudo apt install -y mariadb-client
 ```
 
-### 恢复
+### 恢复（新服务器一条命令）
 
-先用 tg-directory-bot 备份文档里的方法把备份包解密、解压（下面假设解到 `/root/restore`，里面有 `safe/` 目录）。恢复前先停掉 safe 的三个进程（见上文「更新二进制」）。
+把备份包解密、解压到 `/tmp/tg-restore`（方法见 tg-directory-bot 备份文档；里面应有 `safe/` 目录），然后在新服务器上、仓库根目录运行（`git clone https://github.com/davidmuller5273-boop/safe.git ~/safe` 后）：
+
+```bash
+sudo BACKUP_DECRYPTED=/tmp/tg-restore bash ~/safe/deploy/ubuntu/restore-from-backup.sh
+```
+
+也支持把目录作为第一个参数：`sudo bash deploy/ubuntu/restore-from-backup.sh /tmp/tg-restore`；安装成 `/etc/tg-bot-backup.restore.d/safe.sh` 后由备份恢复流程以 `$1`=解密目录调用（`install -m 755 deploy/ubuntu/restore-from-backup.sh /etc/tg-bot-backup.restore.d/safe.sh`）。
+
+脚本按顺序做（每步有中文进度，可重复执行）：
+
+1. 检查 `safe/safe.sql` 完整、`safe/secrets/` 存在；**读不到数据库配置就停止，不猜**。
+2. 读取备份里的 `.env` / `config/app.yml`（与应用相同的优先级：环境变量 > yaml > 默认），得到库名/用户/密码。
+3. 安装依赖：`mysql-server`（已有 MySQL/MariaDB 则跳过）、`mysql-client`、`redis-server`、`git`、`make`、`curl`，设置时区 Asia/Shanghai，安装 Go（版本取 `go.mod`，下载 dl.google.com 官方包并校验 sha256）。
+4. 建库、建用户并授权（与备份配置里的密码一致，密码只经 stdin，不上命令行）；数据库在远程时不建库/用户。
+5. 导入 `safe.sql`。**目标库已有数据时拒绝导入**并提示；确认覆盖请加 `FORCE=1`，只想还原配置并启动请加 `SKIP_DB=1`。
+6. 把 `secrets/` 还原到 `/root/safex/…` 和 `secrets/_abs/` 对应的绝对路径（如 `/etc/safe/safe.env`），权限 600；已存在且内容不同的旧文件另存为 `*.pre-restore.<时间>`。
+7. 还原 `files/`（不覆盖已有文件）。
+8. 取得源码（脚本所在仓库，或 `~/safe`；不存在则 `git clone`）并 `make build`，安装到 `/root/safex/bin/safe`。
+9. 停掉旧进程，按「更新二进制」的方式用 nohup 启动 `admin`、`lottery-collector`、`safew-bot`（`.env` 里的变量会导出给进程，因为应用本身不读 `.env`），日志在 `/root/safex/logs/`，最后打印进程列表。
+
+常用变量：`FORCE=1`、`SKIP_DB=1`、`SAFE_RUN_DIR`（默认 `/root/safex`）、`SAFE_REPO_DIR`、`SAFE_REPO_URL`、`RESTORE_SKIP_PREREQS=1`（已装好依赖）、`RESTORE_NO_START=1`（只还原不启动）。
+
+仓库如果是**私有**的，`git clone` 会失败，脚本会提示：需要一个对 `davidmuller5273-boop/safe` 有 Contents 只读权限的令牌，用 `sudo GITHUB_TOKEN=<令牌> BACKUP_DECRYPTED=/tmp/tg-restore bash restore-from-backup.sh`（令牌不写入 git 配置、不打印）；或者先自己把源码放到 `~/safe`。
+
+注意：
+
+- 解密目录里是**明文密码**，恢复完成并核对 `safe/MANIFEST.txt` 后请立刻 `rm -rf /tmp/tg-restore`。
+- 进程用 nohup 启动，**服务器重启后不会自动拉起**，需要再运行一次本命令（或自行改用 systemd，见 `scripts/install-ubuntu.sh`）。
+- 脚本不恢复 nginx/域名/证书等其它组件；bot 的 Redis 队列数据也不在备份里（队列会重新生成）。
+
+#### 手动恢复（脚本不可用时）
+
+先停掉 safe 的三个进程（见上文「更新二进制」），假设已解密到 `/root/restore`：
 
 ```bash
 # 1) 恢复数据库（dump 自带 CREATE DATABASE IF NOT EXISTS 和 USE；会覆盖同名表）

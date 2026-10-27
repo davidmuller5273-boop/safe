@@ -17,3 +17,14 @@ func TestBackupHookShellSuite(t *testing.T) {
 		t.Fatalf("backup hook tests failed: %v\n%s", err, out)
 	}
 }
+
+func TestRestoreFromBackupShellSuite(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	out, err := exec.Command(bash, "test-restore-from-backup.sh").CombinedOutput()
+	if err != nil {
+		t.Fatalf("restore script tests failed: %v\n%s", err, out)
+	}
+}
