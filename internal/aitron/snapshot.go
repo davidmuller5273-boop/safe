@@ -15,6 +15,8 @@ const (
 	HistoryRows = 10
 	// WindowPeriods is the hit-rate / streak window: 180 periods ≈ 3 hours.
 	WindowPeriods = 180
+	// SiteText is the footer line of the message.
+	SiteText = "走势预测统计网址  188.ms"
 
 	Single = "单"
 	Double = "双"
@@ -129,9 +131,8 @@ func Format(s Snapshot) string {
 	fmt.Fprintf(&b, "本期预测：%s\n", pickLabel(s.NextPick))
 	b.WriteString("<b>📊 周期胜率概览</b>\n")
 	fmt.Fprintf(&b, "%d期：%s（%s）\n", window, pct(s.Window), overall)
-	// The default template carries no ad/branding line; ads are only added by
-	// ads.Wrap when a global or per-group ad is explicitly configured.
-	fmt.Fprintf(&b, "近三小时连中 %d✅ 连错 %d❌", s.StreakWin, s.StreakLoss)
+	fmt.Fprintf(&b, "近三小时连中 %d✅ 连错 %d❌\n", s.StreakWin, s.StreakLoss)
+	b.WriteString(html.EscapeString(SiteText))
 	return b.String()
 }
 
