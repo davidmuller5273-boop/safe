@@ -28,4 +28,5 @@ CREATE TABLE IF NOT EXISTS bot_group_ads (
   UNIQUE KEY idx_bot_group_ads_chat_id (chat_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- Global ads live in system_configs keys: prefix_ad, suffix_ad
+-- Legacy: global ads used to live in system_configs keys prefix_ad, suffix_ad.
+-- They are no longer read; only per-group ads (bot_group_ads) are ever sent.

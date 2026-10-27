@@ -30,7 +30,7 @@ func TestFormatMatchesTemplate(t *testing.T) {
 	want := strings.Join([]string{
 		"<b>波场一分单双</b>",
 		"",
-		"<b>AI预测（近10期）</b>",
+		"<b>AI预测（近15期）</b>",
 		"<pre>区块号 | 结果 | 预测 | 状态",
 		"87473300 | 🔴双 | 🟢单 | ❌",
 		"87473320 | 🟢单 | 🟢单 | ✅",
@@ -47,9 +47,9 @@ func TestFormatMatchesTemplate(t *testing.T) {
 	}
 }
 
-func TestFormatKeepsOnlyLast10AndNewestAtBottom(t *testing.T) {
+func TestFormatKeepsOnlyLast15AndNewestAtBottom(t *testing.T) {
 	var rows []Row
-	for i := 0; i < 15; i++ {
+	for i := 0; i < 20; i++ {
 		rows = append(rows, Row{Block: int64(1000 + 20*i), Result: Single, Pick: Single})
 	}
 	got := Format(Snapshot{NextBlock: 2000, NextPick: Single, Recent: rows})
@@ -60,10 +60,10 @@ func TestFormatKeepsOnlyLast10AndNewestAtBottom(t *testing.T) {
 			body = append(body, l)
 		}
 	}
-	if len(body) != 1+10+1 { // header + 10 history + pending
+	if len(body) != 1+15+1 { // header + 15 history + pending
 		t.Fatalf("table lines = %d: %v", len(body), body)
 	}
-	if !strings.HasPrefix(body[1], "1100 |") || !strings.HasPrefix(body[10], "1280 |") || !strings.HasPrefix(body[11], "2000 | ⏳待开奖") {
+	if !strings.HasPrefix(body[1], "1100 |") || !strings.HasPrefix(body[15], "1380 |") || !strings.HasPrefix(body[16], "2000 | ⏳待开奖") {
 		t.Fatalf("order wrong: %v", body)
 	}
 }
@@ -180,7 +180,7 @@ func TestFallbackDerivesEverythingFromExistingAPI(t *testing.T) {
 	if snap.NextBlock != 87473360 || snap.NextPick != Double {
 		t.Fatalf("next = %d %s", snap.NextBlock, snap.NextPick)
 	}
-	if len(snap.Recent) != 10 || snap.Recent[9].Block != 87473340 || snap.Recent[0].Block != 87473340-9*20 {
+	if len(snap.Recent) != 15 || snap.Recent[14].Block != 87473340 || snap.Recent[0].Block != 87473340-14*20 {
 		t.Fatalf("recent = %+v", snap.Recent)
 	}
 	// independent recomputation
@@ -293,8 +293,10 @@ func TestProposedEndpointPreferredWhenPresent(t *testing.T) {
 	if snap.NextBlock != 87473360 || snap.Overall.Total != 8966 || snap.StreakWin != 3 || snap.StreakLoss != 0 || snap.OverallLimit != 0 {
 		t.Fatalf("snap = %+v", snap)
 	}
-	if fs.heavyCalls.Load() != 0 || fs.lightCalls.Load() != 0 {
-		t.Fatal("fallback must not be used when the proposed endpoint answers")
+	// only 2 recent rows from the endpoint (< HistoryRows) → the table is topped up
+	// from /api/tron-draw, but only when its next block matches; here it does not.
+	if len(snap.Recent) != 2 {
+		t.Fatalf("recent = %+v", snap.Recent)
 	}
 	fs.proposed = `{"enabled":false,"reason":"AI_API_KEY 未配置"}`
 	_, err = NewClient(fs.URL).Fetch(context.Background())

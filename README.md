@@ -8,7 +8,7 @@
 - **lottery-collector**：币安极速飞艇采集 → MySQL + Redis 队列
 - **safew-bot**：消费开奖队列发送热号预测；长轮询处理机器人命令
 - **权限分级（机器人侧）**：developer / admin / group_admin
-- **消息前后广告**：`prefix_ad` + `suffix_ad`，组装后 **一次** `sendMessage`
+- **消息前后广告**：`prefix_ad` + `suffix_ad`，组装后 **一次** `sendMessage`；**仅按群设置，无全局广告回落**（没设置广告的群只发正文）
 - **chatadmin**：Vue 3 + Element Plus 管理前端
 
 详细使用说明见 [`docs/使用教程.md`](docs/使用教程.md)（**仅文档**，不会作为机器人消息下发）。  

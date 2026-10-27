@@ -216,7 +216,7 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 		if err := ads.ClearGroup(w.db, chatID); err != nil {
 			return err
 		}
-		return w.replyPlain(ctx, botConfig.Token, chatID, "已删除本群广告覆盖，将回落全局配置")
+		return w.replyPlain(ctx, botConfig.Token, chatID, "已删除本群广告（没有广告的群只发送正文，不再回落全局广告）")
 	case "/say":
 		ok, err := w.perms.CanControlSensitive(userID, chatID)
 		if err != nil {
@@ -552,6 +552,10 @@ func (w worker) cmdChineseAdBoth(ctx context.Context, botConfig systemconfig.Saf
 	return w.replyPlain(ctx, botConfig.Token, chatID, "已同时更新本群广告\n前广告：\n"+show(prefix)+"\n\n后广告：\n"+show(suffix))
 }
 
+// globalAdDisabledMsg: the global ad no longer exists; every group only ever
+// shows its own ad.
+const globalAdDisabledMsg = "全局广告已取消：每个群只显示本群自己设置的广告，没有设置的群只发送正文。请用 /setprefix、/setsuffix（或 /广告前后）为本群设置。"
+
 func (w worker) cmdSetAd(ctx context.Context, botConfig systemconfig.SafeW, userID, chatID, args string, isPrefix bool) error {
 	ok, err := w.perms.CanControlSensitive(userID, chatID)
 	if err != nil {
@@ -565,18 +569,7 @@ func (w worker) cmdSetAd(ctx context.Context, botConfig systemconfig.SafeW, user
 		return w.replyPlain(ctx, botConfig.Token, chatID, "用法: /setprefix|setsuffix [global|group] <文本>")
 	}
 	if scope == "global" {
-		role, err := w.perms.RoleInChat(userID, chatID)
-		if err != nil {
-			return err
-		}
-		if role != botperm.RoleDeveloper && role != botperm.RoleAdmin {
-			return w.replyPlain(ctx, botConfig.Token, chatID, "设置全局广告需要开发者或超级管理员")
-		}
-		if isPrefix {
-			err = ads.SaveGlobal(w.db, &content, nil)
-		} else {
-			err = ads.SaveGlobal(w.db, nil, &content)
-		}
+		return w.replyPlain(ctx, botConfig.Token, chatID, globalAdDisabledMsg)
 	} else {
 		if isPrefix {
 			err = ads.SaveGroup(w.db, chatID, &content, nil)
@@ -608,18 +601,7 @@ func (w worker) cmdClearAd(ctx context.Context, botConfig systemconfig.SafeW, us
 	}
 	empty := ""
 	if scope == "global" {
-		role, err := w.perms.RoleInChat(userID, chatID)
-		if err != nil {
-			return err
-		}
-		if role != botperm.RoleDeveloper && role != botperm.RoleAdmin {
-			return w.replyPlain(ctx, botConfig.Token, chatID, "清空全局广告需要开发者或超级管理员")
-		}
-		if isPrefix {
-			err = ads.SaveGlobal(w.db, &empty, nil)
-		} else {
-			err = ads.SaveGlobal(w.db, nil, &empty)
-		}
+		return w.replyPlain(ctx, botConfig.Token, chatID, globalAdDisabledMsg)
 	} else {
 		if isPrefix {
 			err = ads.SaveGroup(w.db, chatID, &empty, nil)

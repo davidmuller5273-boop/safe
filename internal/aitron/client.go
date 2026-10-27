@@ -67,7 +67,17 @@ func (c *Client) Fetch(ctx context.Context) (*Snapshot, error) {
 	}
 	switch {
 	case status == http.StatusOK:
-		return parseProposed(body)
+		snap, err := parseProposed(body)
+		if err != nil || len(snap.Recent) >= HistoryRows {
+			return snap, err
+		}
+		// The dedicated endpoint may still return fewer than HistoryRows rows
+		// (older tg-directory-bot builds return 10): top the table up from
+		// /api/tron-draw, keeping the endpoint's own statistics.
+		if fb, ferr := c.fetchFallback(ctx); ferr == nil && fb.NextBlock == snap.NextBlock && len(fb.Recent) > len(snap.Recent) {
+			snap.Recent = fb.Recent
+		}
+		return snap, nil
 	case status == http.StatusNotFound:
 		return c.fetchFallback(ctx)
 	default:

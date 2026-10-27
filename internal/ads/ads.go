@@ -9,11 +9,6 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-const (
-	GlobalPrefixKey = "prefix_ad"
-	GlobalSuffixKey = "suffix_ad"
-)
-
 // BuildOutboundText joins non-empty prefix, body, suffix with a blank line.
 // If both ads are empty, returns body only. Always a single string for one sendMessage.
 func BuildOutboundText(prefix, body, suffix string) string {
@@ -35,42 +30,39 @@ func BuildOutboundText(prefix, body, suffix string) string {
 type Settings struct {
 	PrefixAd string
 	SuffixAd string
-	Scope    string // "global" or "group"
+	Scope    string // "group" (chat has its own ad) or "none"
 	ChatID   string
 }
 
+// LoadForChat returns the chat's OWN ads only. There is no global fallback:
+// a chat without its own prefix/suffix gets empty Settings (Scope "none"), and
+// Wrap then sends just the body.
 func LoadForChat(db *gorm.DB, chatID string) (Settings, error) {
 	chatID = strings.TrimSpace(chatID)
-	if chatID != "" {
-		var group domain.BotGroupAd
-		// Quiet: missing group row is expected and falls back to global ads.
-		err := db.Session(&gorm.Session{Logger: logger.Default.LogMode(logger.Silent)}).
-			Where("chat_id = ?", chatID).First(&group).Error
-		if err != nil && err != gorm.ErrRecordNotFound {
-			return Settings{}, err
-		}
-		if err == nil && (strings.TrimSpace(group.PrefixAd) != "" || strings.TrimSpace(group.SuffixAd) != "") {
-			// Per side: the group value wins; an empty side falls back to the global ad,
-			// so setting only a group prefix keeps the global suffix (and vice versa).
-			global, gerr := LoadGlobal(db)
-			if gerr != nil {
-				return Settings{}, gerr
-			}
-			return mergeSides(group.PrefixAd, group.SuffixAd, global, chatID), nil
-		}
+	none := Settings{Scope: "none", ChatID: chatID}
+	if chatID == "" {
+		return none, nil
 	}
-	return LoadGlobal(db)
+	var group domain.BotGroupAd
+	// Quiet: a missing group row is the normal "no ads" case.
+	err := db.Session(&gorm.Session{Logger: logger.Default.LogMode(logger.Silent)}).
+		Where("chat_id = ?", chatID).First(&group).Error
+	if err == gorm.ErrRecordNotFound {
+		return none, nil
+	}
+	if err != nil {
+		return Settings{}, err
+	}
+	return groupSettings(group, chatID), nil
 }
 
-func mergeSides(groupPrefix, groupSuffix string, global Settings, chatID string) Settings {
-	s := Settings{PrefixAd: global.PrefixAd, SuffixAd: global.SuffixAd, Scope: "group", ChatID: chatID}
-	if strings.TrimSpace(groupPrefix) != "" {
-		s.PrefixAd = groupPrefix
+// groupSettings turns a chat's own ad row into Settings; both sides empty means
+// "no ads" (Scope "none"). Nothing else is ever merged in.
+func groupSettings(group domain.BotGroupAd, chatID string) Settings {
+	if strings.TrimSpace(group.PrefixAd) == "" && strings.TrimSpace(group.SuffixAd) == "" {
+		return Settings{Scope: "none", ChatID: chatID}
 	}
-	if strings.TrimSpace(groupSuffix) != "" {
-		s.SuffixAd = groupSuffix
-	}
-	return s
+	return Settings{PrefixAd: group.PrefixAd, SuffixAd: group.SuffixAd, Scope: "group", ChatID: chatID}
 }
 
 // SplitPrefixSuffix parses "前广告 | 后广告" or a multi-line form where a line
@@ -89,39 +81,6 @@ func SplitPrefixSuffix(text string) (prefix, suffix string, ok bool) {
 		}
 	}
 	return "", "", false
-}
-
-func LoadGlobal(db *gorm.DB) (Settings, error) {
-	var configs []domain.SystemConfig
-	if err := db.Where("`key` IN ?", []string{GlobalPrefixKey, GlobalSuffixKey}).Find(&configs).Error; err != nil {
-		return Settings{}, err
-	}
-	s := Settings{Scope: "global"}
-	for _, c := range configs {
-		switch c.Key {
-		case GlobalPrefixKey:
-			s.PrefixAd = c.Value
-		case GlobalSuffixKey:
-			s.SuffixAd = c.Value
-		}
-	}
-	return s, nil
-}
-
-func SaveGlobal(db *gorm.DB, prefix, suffix *string) error {
-	return db.Transaction(func(tx *gorm.DB) error {
-		if prefix != nil {
-			if err := upsertConfig(tx, GlobalPrefixKey, *prefix); err != nil {
-				return err
-			}
-		}
-		if suffix != nil {
-			if err := upsertConfig(tx, GlobalSuffixKey, *suffix); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
 }
 
 func SaveGroup(db *gorm.DB, chatID string, prefix, suffix *string) error {
@@ -151,12 +110,7 @@ func ClearGroup(db *gorm.DB, chatID string) error {
 	return db.Where("chat_id = ?", strings.TrimSpace(chatID)).Delete(&domain.BotGroupAd{}).Error
 }
 
-func upsertConfig(tx *gorm.DB, key, value string) error {
-	cfg := domain.SystemConfig{Key: key}
-	return tx.Where("`key` = ?", key).Assign(domain.SystemConfig{Value: value}).FirstOrCreate(&cfg).Error
-}
-
-// Wrap loads ads for chat and builds a single outbound text.
+// Wrap loads the chat's own ads (never a global ad) and builds a single outbound text.
 func Wrap(db *gorm.DB, chatID, body string) (string, error) {
 	s, err := LoadForChat(db, chatID)
 	if err != nil {

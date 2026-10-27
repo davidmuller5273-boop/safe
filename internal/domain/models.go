@@ -108,7 +108,7 @@ type BotGroupAdmin struct {
 }
 
 // BotGroupAd stores optional per-group prefix/suffix ads.
-// Empty fields fall back to global ads in system_configs.
+// A group without its own ad (both fields empty) sends the plain body: there is no global fallback.
 type BotGroupAd struct {
 	ID        uint      `json:"id" gorm:"primaryKey"`
 	ChatID    string    `json:"chat_id" gorm:"uniqueIndex;size:64;not null"`

@@ -12,7 +12,7 @@ import (
 
 const (
 	// HistoryRows is how many finished periods the table shows.
-	HistoryRows = 10
+	HistoryRows = 15
 	// WindowPeriods is the hit-rate / streak window: 180 periods ≈ 3 hours.
 	WindowPeriods = 180
 	// SiteText is the footer line of the message.
@@ -125,7 +125,7 @@ func Format(s Snapshot) string {
 
 	var b strings.Builder
 	b.WriteString("<b>波场一分单双</b>\n\n")
-	b.WriteString("<b>AI预测（近10期）</b>\n")
+	b.WriteString("<b>AI预测（近15期）</b>\n")
 	b.WriteString("<pre>" + html.EscapeString(table.String()) + "</pre>\n")
 	b.WriteString("────────────────\n")
 	fmt.Fprintf(&b, "本期预测：%s\n", pickLabel(s.NextPick))
