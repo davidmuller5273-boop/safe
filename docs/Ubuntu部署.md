@@ -171,3 +171,56 @@ SHOW TABLES LIKE 'lottery_broadcast_%';
 SELECT chat_id, selector FROM lottery_broadcast_subscriptions;
 SELECT chat_id, game_code, issue, status, pinned, last_error FROM lottery_broadcast_outbox ORDER BY id DESC LIMIT 20;
 ```
+
+## 自动加密备份：safe 数据一并备份（备份钩子）
+
+tg-directory-bot 的备份脚本（每 2 天一次，也可 `sudo tgbot-backup` 手动触发，加密后推送到私有 GitHub 仓库）会以 root 依次执行 `/etc/tg-bot-backup.d/*.sh`，并把暂存目录作为 `$1` 传入。safe 提供了对应钩子：
+
+```bash
+cd ~/safe && git pull origin main && sudo bash deploy/ubuntu/install-backup-hook.sh        # 安装/更新（可重复执行）
+sudo bash deploy/ubuntu/install-backup-hook.sh --test                                      # 可选：试跑一次，只打印清单，随后删除
+```
+
+钩子（`deploy/ubuntu/safe-backup-hook.sh` → `/etc/tg-bot-backup.d/safe.sh`，root、755）写入 `$1/safe/`：
+
+| 路径 | 内容 |
+|---|---|
+| `safe/safe.sql` | 应用数据库的一致性 `mysqldump`（`--single-transaction --routines --triggers --events --databases`）。**含 SafeW 机器人 Token（`system_configs`）与后台账号数据** |
+| `safe/secrets/` | `/root/safex` 下的 `.env`、`.env.*`、`*.env`、`config/*.yml`（含数据库密码、JWT 密钥），以及实际生效的 `CONFIG_FILE` / `/etc/safe/safe.env`（在运行目录外的放 `secrets/_abs/` 下）。**权限保持 600，目录 700** |
+| `safe/files/` | 运行目录下其它小型数据文件（相对路径保持不变） |
+| `safe/MANIFEST.txt` | 本次清单：只有文件名与配置来源，不含任何密码 |
+
+**不备份**：`bin/`（二进制，可重新编译）、`logs/` 与 `*.log`、`.git`、`node_modules`、可执行文件、符号链接、大于 5 MiB 的文件、`*.pem`/`*.key` 等密钥文件、内容里含 password/secret/token 字样的其它数据文件（`.env` 与 config 除外，它们专门放进 `secrets/`）。MySQL 之外的 Redis 队列是临时数据，不备份。
+
+> ⚠️ `safe/secrets/` 和 `safe.sql` 含真实密码/令牌：只能以**加密后的备份包**形式离开服务器，绝不能明文进入 git。钩子本身不会把任何密钥打印到屏幕或日志；数据库密码只写入权限 600 的临时凭据文件并在用完后删除。
+
+读取数据库连接信息的顺序与应用一致（`internal/config`）：运行中 `safe` 进程的环境变量（`/proc/<pid>/environ`）→ `/root/safex/.env`、`/root/safex/safe.env`、`/etc/safe/safe.env`（只解析 `KEY=VALUE`，不 `source`）→ `CONFIG_FILE`（默认 `/root/safex/config/app.yml`）的 `mysql:` 段 → 默认值。需要系统里有 `mysqldump`：没有时钩子会提示并以非 0 退出（备份脚本只记录，不影响其它钩子），安装命令：
+
+```bash
+sudo apt update && sudo apt install -y mysql-client     # 系统用 MariaDB 时：sudo apt install -y mariadb-client
+```
+
+### 恢复
+
+先用 tg-directory-bot 备份文档里的方法把备份包解密、解压（下面假设解到 `/root/restore`，里面有 `safe/` 目录）。恢复前先停掉 safe 的三个进程（见上文「更新二进制」）。
+
+```bash
+# 1) 恢复数据库（dump 自带 CREATE DATABASE IF NOT EXISTS 和 USE；会覆盖同名表）
+sudo mysql < /root/restore/safe/safe.sql
+
+# 2) 恢复配置与密钥（保持 600；.env、config/app.yml 回到 /root/safex）
+sudo bash -c 'cd /root/restore/safe/secrets && for f in $(find . -type f ! -path "./_abs/*"); do install -D -m 600 "$f" "/root/safex/$f"; done'
+
+# 3) （如有）运行目录之外的配置，例如 /etc/safe/safe.env，按原绝对路径还原
+[ -d /root/restore/safe/secrets/_abs ] && sudo cp -a --no-preserve=ownership /root/restore/safe/secrets/_abs/. / && sudo chmod 600 /etc/safe/safe.env 2>/dev/null; true
+
+# 4) 恢复其它数据文件（如有）
+[ -d /root/restore/safe/files ] && sudo cp -a /root/restore/safe/files/. /root/safex/; true
+
+# 5) 用 MANIFEST 核对，然后启动三个进程；最后清掉解密出来的明文
+cat /root/restore/safe/MANIFEST.txt
+sudo rm -rf /root/restore
+```
+
+数据库用户不存在时（全新机器），先按上文「3. 配置」创建库与用户，再执行第 1 步：库名/用户/密码以 `secrets/.env` 或 `secrets/config/app.yml` 里的为准。`bin/safe` 请用 `make build` 重新编译，不在备份里。
+
