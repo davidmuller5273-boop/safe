@@ -70,9 +70,13 @@ Nginx 参考 `deploy/nginx-safe.conf.example`。**不要**把 3306/6379/8081 暴
 
 `/开启6码` 会自动开推送并关闭冠军 7码；`/开启7码` 同理（冠军只推一种）。`/开启亚军6码` / `/开启亚军7码` 同理作用于亚军，且**不影响**冠军标志。仅 `/push on` 且冠军/亚军 6/7 标志全为 false 时不会推送任何码。
 
-### AI波场单双一分（可选）
+### AI波场单双一分 / 自动最优波场单双一分（可选）
 
-`/开启AI波场单双一分` / `/关闭AI波场单双一分`（开发者或超级管理员）按群开关；需要同机 tg-directory-bot 的 web 服务（默认 `http://127.0.0.1:8080`）且已配置 `AI_API_KEY`。可选环境变量：`AI_TRON_API_URL`、`AI_TRON_WITH_ADS=0`（不带群广告）、`AI_TRON_ENABLED=0`（整体关闭）。数据契约与降级见 `docs/AI波场单双一分.md`。
+`/开启AI波场单双一分` / `/关闭AI波场单双一分`（开发者或超级管理员）按群开关；需要同机 tg-directory-bot 的 web 服务（默认 `http://127.0.0.1:8080`）且已配置 `AI_API_KEY`。可选环境变量：`AI_TRON_API_URL`、`AI_TRON_WITH_ADS=0`（不带群广告）、`AI_TRON_ENABLED=0`（整体关闭）。
+
+自动最优：`/开启自动最优波场单双一分` / `/关闭自动最优波场单双一分`，同样按群开关，使用独立的开关列 `enable_auto_tron` 与发件箱表 `auto_tron_outbox`（启动时自动建/加列），数据来自同机 tg-directory-bot 的 `GET /api/tron-draw/auto-broadcast`（接口不存在或 `enabled=false` 时静默跳过，只记一行日志）。可选环境变量：`AUTO_TRON_ENABLED=0`（整体关闭自动最优，不影响 AI）、`AUTO_TRON_API_URL`、`AUTO_TRON_WITH_ADS`（未设置时沿用 `AI_TRON_*`）。
+
+消息里的「近三小时 最大连中/最大连错」由 tg-directory-bot 返回（`window.max_win` / `window.max_loss`），safe 不自行计算；对方还没升级时这一行不显示。数据契约与降级见 `docs/AI波场单双一分.md`。
 
 ### 更新二进制（示例：源码在 `~/safe`，运行目录 `/root/safex`）
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -15,9 +16,6 @@ import (
 const DefaultBaseURL = "http://127.0.0.1:8080"
 
 const (
-	// ProposedPath is the (not yet built) tg-directory-bot endpoint this client
-	// prefers; see docs/AI波场单双一分.md for the JSON contract.
-	ProposedPath = "/api/tron-draw/ai-broadcast"
 	// fallbackAILimit is the largest ai_limit /api/tron-draw accepts.
 	fallbackAILimit = 5000
 	maxBody         = 16 << 20
@@ -29,18 +27,22 @@ const (
 type Client struct {
 	BaseURL string
 	HTTP    *http.Client
+	Kind    Kind
 
 	mu     sync.Mutex
 	cached *Snapshot // fallback mode: full snapshot for cached.NextBlock
 }
 
-// NewClient builds a client; empty baseURL uses DefaultBaseURL.
-func NewClient(baseURL string) *Client {
+// NewClient builds a client for the AI broadcast; empty baseURL uses DefaultBaseURL.
+func NewClient(baseURL string) *Client { return NewKindClient(baseURL, AI) }
+
+// NewKindClient builds a client for one broadcast kind.
+func NewKindClient(baseURL string, kind Kind) *Client {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
 	}
-	return &Client{BaseURL: baseURL, HTTP: &http.Client{Timeout: 20 * time.Second}}
+	return &Client{BaseURL: baseURL, HTTP: &http.Client{Timeout: 20 * time.Second}, Kind: kind}
 }
 
 func (c *Client) get(ctx context.Context, path string) (int, []byte, error) {
@@ -61,14 +63,14 @@ func (c *Client) get(ctx context.Context, path string) (int, []byte, error) {
 // Fetch returns the current snapshot. Errors: ErrPending (pick not stored yet),
 // *UnavailableError (AI off / bad data), other errors are transport failures.
 func (c *Client) Fetch(ctx context.Context) (*Snapshot, error) {
-	status, body, err := c.get(ctx, ProposedPath)
+	status, body, err := c.get(ctx, c.Kind.Path)
 	if err != nil {
 		return nil, err
 	}
 	switch {
 	case status == http.StatusOK:
 		snap, err := parseProposed(body)
-		if err != nil || len(snap.Recent) >= HistoryRows {
+		if err != nil || len(snap.Recent) >= HistoryRows || !c.Kind.Fallback {
 			return snap, err
 		}
 		// The dedicated endpoint may still return fewer than HistoryRows rows
@@ -79,13 +81,16 @@ func (c *Client) Fetch(ctx context.Context) (*Snapshot, error) {
 		}
 		return snap, nil
 	case status == http.StatusNotFound:
+		if !c.Kind.Fallback {
+			return nil, &UnavailableError{Reason: c.Kind.Path + " 返回 404（tg-directory-bot 未提供该接口或统计页已关闭）"}
+		}
 		return c.fetchFallback(ctx)
 	default:
-		return nil, fmt.Errorf("%s 返回 HTTP %d", ProposedPath, status)
+		return nil, fmt.Errorf("%s 返回 HTTP %d", c.Kind.Path, status)
 	}
 }
 
-// ---- proposed endpoint: GET /api/tron-draw/ai-broadcast ----
+// ---- dedicated endpoints: GET /api/tron-draw/ai-broadcast and /auto-broadcast (same JSON shape) ----
 
 type rateJSON struct {
 	Hits  int `json:"hits"`
@@ -106,12 +111,38 @@ type proposedJSON struct {
 	Window struct {
 		Periods int `json:"periods"`
 		rateJSON
+		MaxWin  json.RawMessage `json:"max_win"`
+		MaxLoss json.RawMessage `json:"max_loss"`
 	} `json:"window"`
 	Overall rateJSON `json:"overall"`
-	Streak  struct {
-		Kind  string `json:"kind"` // "win" | "loss" | "none"
-		Count int    `json:"count"`
-	} `json:"streak"`
+}
+
+// parseRun reads a run length the server computed: either a plain number or the
+// existing {"len": N, "start": i} shape. ok=false when absent / invalid.
+func parseRun(raw json.RawMessage) (int, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, false
+	}
+	var n int
+	if err := json.Unmarshal(raw, &n); err == nil && n >= 0 {
+		return n, true
+	}
+	var obj struct {
+		Len *int `json:"len"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil && obj.Len != nil && *obj.Len >= 0 {
+		return *obj.Len, true
+	}
+	return 0, false
+}
+
+// setMaxRuns fills MaxWin/MaxLoss only when the server provided both.
+func (s *Snapshot) setMaxRuns(win, loss json.RawMessage) {
+	w, okW := parseRun(win)
+	l, okL := parseRun(loss)
+	if okW && okL {
+		s.MaxWin, s.MaxLoss = &w, &l
+	}
 }
 
 func parseProposed(body []byte) (*Snapshot, error) {
@@ -135,12 +166,9 @@ func parseProposed(body []byte) (*Snapshot, error) {
 	for _, r := range p.Recent {
 		s.Recent = append(s.Recent, Row{Block: r.Block, Result: r.Result, Pick: r.Pick})
 	}
-	switch p.Streak.Kind {
-	case "win":
-		s.StreakWin = p.Streak.Count
-	case "loss":
-		s.StreakLoss = p.Streak.Count
-	}
+	// the contract says oldest → newest; sort anyway so a reversed feed cannot garble the table
+	sort.SliceStable(s.Recent, func(i, j int) bool { return s.Recent[i].Block < s.Recent[j].Block })
+	s.setMaxRuns(p.Window.MaxWin, p.Window.MaxLoss)
 	if err := s.Validate(); err != nil {
 		return nil, err
 	}
@@ -157,7 +185,11 @@ type drawJSON struct {
 	} `json:"recent"`
 	AI *struct {
 		Enabled bool `json:"enabled"`
-		Next    *struct {
+		Window  *struct {
+			MaxWin  json.RawMessage `json:"max_win"`
+			MaxLoss json.RawMessage `json:"max_loss"`
+		} `json:"window"`
+		Next *struct {
 			Block int64  `json:"block"`
 			Pick  string `json:"pick"`
 		} `json:"next"`
@@ -273,23 +305,11 @@ func snapshotFromDraw(d *drawJSON) (*Snapshot, error) {
 	if len(items) > 0 && items[0].Predicted != nil && d.TotalRecorded > int64(len(items)) {
 		s.OverallLimit = len(items)
 	}
-	for i := len(windowRows) - 1; i >= 0; i-- {
-		ok := windowRows[i].OK()
-		if i == len(windowRows)-1 {
-			if ok {
-				s.StreakWin = 1
-			} else {
-				s.StreakLoss = 1
-			}
-			continue
-		}
-		if ok && s.StreakWin > 0 {
-			s.StreakWin++
-		} else if !ok && s.StreakLoss > 0 {
-			s.StreakLoss++
-		} else {
-			break
-		}
+	// 近三小时 最大连中/连错 is NOT computed here: only a value the web program
+	// itself returns in ai.window (max_win / max_loss) is used; older servers
+	// lack it and the line is simply omitted.
+	if d.AI.Window != nil {
+		s.setMaxRuns(d.AI.Window.MaxWin, d.AI.Window.MaxLoss)
 	}
 	if err := s.Validate(); err != nil {
 		return nil, err

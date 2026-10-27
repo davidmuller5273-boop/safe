@@ -13,7 +13,7 @@ import (
 const (
 	// HistoryRows is how many finished periods the table shows.
 	HistoryRows = 15
-	// WindowPeriods is the hit-rate / streak window: 180 periods ≈ 3 hours.
+	// WindowPeriods is the hit-rate window: 180 periods ≈ 3 hours.
 	WindowPeriods = 180
 	// SiteText is the footer line of the message.
 	SiteText = "走势预测统计网址  188.ms"
@@ -61,9 +61,32 @@ type Snapshot struct {
 	// (fallback API cannot return more); the message then says 近N期 instead of 已预测.
 	OverallLimit int
 
-	StreakWin  int // current trailing run of correct picks within the window (0 if the last was wrong)
-	StreakLoss int // current trailing run of wrong picks within the window
+	// MaxWin / MaxLoss are the longest consecutive hits / misses within the newest
+	// 180 drawn blocks (近三小时), exactly as computed and returned by the
+	// tg-directory-bot web program (window.max_win / window.max_loss). nil =
+	// the server did not provide them: the line is then omitted. The bot never
+	// computes these itself.
+	MaxWin  *int
+	MaxLoss *int
 }
+
+// Kind describes one broadcast flavour (AI 预测 / 自动最优 预测); both share
+// the same snapshot, template, runner and outbox code.
+type Kind struct {
+	Key      string // short id used in logs/tests: "ai" / "auto"
+	Name     string // display + command name, e.g. "AI波场单双一分"
+	Subtitle string // table heading, e.g. "AI预测（近15期）"
+	Path     string // tg-directory-bot endpoint
+	Fallback bool   // may fall back to the existing /api/tron-draw JSON when Path is 404
+	Table    string // outbox table
+}
+
+var (
+	// AI is the 「AI波场单双一分」 broadcast.
+	AI = Kind{Key: "ai", Name: "AI波场单双一分", Subtitle: "AI预测（近15期）", Path: "/api/tron-draw/ai-broadcast", Fallback: true, Table: "ai_tron_outbox"}
+	// Auto is the 「自动最优波场单双一分」 broadcast.
+	Auto = Kind{Key: "auto", Name: "自动最优波场单双一分", Subtitle: "自动最优预测（近15期）", Path: "/api/tron-draw/auto-broadcast", Fallback: false, Table: "auto_tron_outbox"}
+)
 
 // ErrPending means the draw is recorded but the AI pick for the next period is
 // not stored yet (it is generated in the background); try again shortly.
@@ -102,7 +125,7 @@ func pct(r Rate) string {
 
 // Format renders the SafeW HTML message (same <b>/<pre> style as the 热号预测
 // push). Table rows are oldest first, the pending period is the last row.
-func Format(s Snapshot) string {
+func Format(k Kind, s Snapshot) string {
 	rows := s.Recent
 	if len(rows) > HistoryRows {
 		rows = rows[len(rows)-HistoryRows:]
@@ -125,13 +148,15 @@ func Format(s Snapshot) string {
 
 	var b strings.Builder
 	b.WriteString("<b>波场一分单双</b>\n\n")
-	b.WriteString("<b>AI预测（近15期）</b>\n")
+	b.WriteString("<b>" + html.EscapeString(k.Subtitle) + "</b>\n")
 	b.WriteString("<pre>" + html.EscapeString(table.String()) + "</pre>\n")
 	b.WriteString("────────────────\n")
 	fmt.Fprintf(&b, "本期预测：%s\n", pickLabel(s.NextPick))
 	b.WriteString("<b>📊 周期胜率概览</b>\n")
 	fmt.Fprintf(&b, "%d期：%s（%s）\n", window, pct(s.Window), overall)
-	fmt.Fprintf(&b, "近三小时连中 %d✅ 连错 %d❌\n", s.StreakWin, s.StreakLoss)
+	if s.MaxWin != nil && s.MaxLoss != nil { // values come from the web program; never computed here
+		fmt.Fprintf(&b, "近三小时 最大连中 %d✅ 最大连错 %d❌\n", *s.MaxWin, *s.MaxLoss)
+	}
 	b.WriteString(html.EscapeString(SiteText))
 	return b.String()
 }

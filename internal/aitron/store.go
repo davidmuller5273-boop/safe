@@ -7,13 +7,11 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-// TableOutbox holds one row per (chat, period block): the unique key is what
-// prevents sending the same period twice, also across bot restarts.
-const TableOutbox = "ai_tron_outbox"
-
-// SchemaStatements are idempotent DDL statements.
-var SchemaStatements = []string{
-	"CREATE TABLE IF NOT EXISTS `" + TableOutbox + "` (" +
+// OutboxDDL returns the idempotent DDL of one kind's outbox table. It holds
+// one row per (chat, period block): the unique key is what prevents sending the
+// same period twice, also across bot restarts.
+func OutboxDDL(table string) string {
+	return "CREATE TABLE IF NOT EXISTS `" + table + "` (" +
 		"`id` bigint unsigned NOT NULL AUTO_INCREMENT," +
 		"`chat_id` varchar(64) NOT NULL," +
 		"`block` bigint NOT NULL," +
@@ -24,20 +22,15 @@ var SchemaStatements = []string{
 		"`created_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)," +
 		"`sent_at` datetime(3) NULL DEFAULT NULL," +
 		"PRIMARY KEY (`id`)," +
-		"UNIQUE KEY `uk_ai_tron_chat_block` (`chat_id`,`block`)," +
-		"KEY `idx_ai_tron_status` (`status`,`id`)" +
-		") ENGINE=InnoDB",
+		"UNIQUE KEY `uk_tron_chat_block` (`chat_id`,`block`)," +
+		"KEY `idx_tron_status` (`status`,`id`)" +
+		") ENGINE=InnoDB"
 }
 
-// EnsureSchema creates the outbox table if missing. Safe on every startup.
-func EnsureSchema(db *gorm.DB) error {
+// EnsureSchema creates the kind's outbox table if missing. Safe on every startup.
+func EnsureSchema(db *gorm.DB, kind Kind) error {
 	quiet := db.Session(&gorm.Session{Logger: logger.Default.LogMode(logger.Silent)})
-	for _, stmt := range SchemaStatements {
-		if err := quiet.Exec(stmt).Error; err != nil {
-			return err
-		}
-	}
-	return nil
+	return quiet.Exec(OutboxDDL(kind.Table)).Error
 }
 
 // OutboxItem is one queued broadcast.
@@ -50,23 +43,19 @@ type OutboxItem struct {
 	CreatedAt time.Time `gorm:"column:created_at"`
 }
 
-// Flags is the per-group switch store (implemented by botperm.Store).
-type Flags interface {
-	ListAITronChatIDs() ([]string, error)
-	SetAITronEnabled(chatID string, enabled bool) error
-}
-
-// MySQLStore is the production Store.
+// MySQLStore is the production Store for one broadcast kind.
 type MySQLStore struct {
 	DB    *gorm.DB
-	Flags Flags
+	Table string                             // outbox table (Kind.Table)
+	List  func() ([]string, error)           // chats with this broadcast enabled
+	Set   func(chatID string, on bool) error // per-group flag writer
 }
 
-func (s *MySQLStore) EnabledChats() ([]string, error) { return s.Flags.ListAITronChatIDs() }
+func (s *MySQLStore) EnabledChats() ([]string, error) { return s.List() }
 
 // Enqueue inserts a pending row; false means this (chat, block) already exists.
 func (s *MySQLStore) Enqueue(chatID string, block int64, body string) (bool, error) {
-	res := s.DB.Exec("INSERT INTO `"+TableOutbox+"` (chat_id, block, body, status, created_at) VALUES (?, ?, ?, 'pending', NOW(3)) "+
+	res := s.DB.Exec("INSERT INTO `"+s.Table+"` (chat_id, block, body, status, created_at) VALUES (?, ?, ?, 'pending', NOW(3)) "+
 		"ON DUPLICATE KEY UPDATE id = id", chatID, block, body)
 	if res.Error != nil {
 		return false, res.Error
@@ -76,36 +65,36 @@ func (s *MySQLStore) Enqueue(chatID string, block int64, body string) (bool, err
 
 func (s *MySQLStore) Pending(limit int) ([]OutboxItem, error) {
 	var rows []OutboxItem
-	err := s.DB.Raw("SELECT id, chat_id, block, body, attempts, created_at FROM `"+TableOutbox+"` WHERE status = 'pending' ORDER BY block, id LIMIT ?", limit).Scan(&rows).Error
+	err := s.DB.Raw("SELECT id, chat_id, block, body, attempts, created_at FROM `"+s.Table+"` WHERE status = 'pending' ORDER BY block, id LIMIT ?", limit).Scan(&rows).Error
 	return rows, err
 }
 
 func (s *MySQLStore) MarkSent(id uint64) error {
-	return s.DB.Exec("UPDATE `"+TableOutbox+"` SET status='sent', attempts=attempts+1, last_error='', sent_at=NOW(3) WHERE id=?", id).Error
+	return s.DB.Exec("UPDATE `"+s.Table+"` SET status='sent', attempts=attempts+1, last_error='', sent_at=NOW(3) WHERE id=?", id).Error
 }
 
 // MarkAttemptFailed counts a failed attempt; after maxAttempts the row becomes 'failed'.
 func (s *MySQLStore) MarkAttemptFailed(id uint64, errText string, maxAttempts int) error {
-	return s.DB.Exec("UPDATE `"+TableOutbox+"` SET attempts=attempts+1, last_error=?, status=CASE WHEN attempts >= ? THEN 'failed' ELSE 'pending' END WHERE id=?",
+	return s.DB.Exec("UPDATE `"+s.Table+"` SET attempts=attempts+1, last_error=?, status=CASE WHEN attempts >= ? THEN 'failed' ELSE 'pending' END WHERE id=?",
 		trunc(errText, 500), maxAttempts, id).Error
 }
 
 // MarkFailed gives up on a row immediately (stale, expired, dead group).
 func (s *MySQLStore) MarkFailed(id uint64, errText string) error {
-	return s.DB.Exec("UPDATE `"+TableOutbox+"` SET status='failed', last_error=? WHERE id=? AND status='pending'", trunc(errText, 500), id).Error
+	return s.DB.Exec("UPDATE `"+s.Table+"` SET status='failed', last_error=? WHERE id=? AND status='pending'", trunc(errText, 500), id).Error
 }
 
-// DisableChat switches the group's AI波场单双一分 off and voids its pending rows.
+// DisableChat switches the group's broadcast flag off and voids its pending rows.
 func (s *MySQLStore) DisableChat(chatID string) error {
-	if err := s.Flags.SetAITronEnabled(chatID, false); err != nil {
+	if err := s.Set(chatID, false); err != nil {
 		return err
 	}
-	return s.DB.Exec("UPDATE `"+TableOutbox+"` SET status='failed', last_error='群不可达，已关闭 AI波场单双一分' WHERE chat_id = ? AND status = 'pending'", chatID).Error
+	return s.DB.Exec("UPDATE `"+s.Table+"` SET status='failed', last_error='群不可达，已关闭该播报' WHERE chat_id = ? AND status = 'pending'", chatID).Error
 }
 
 // Prune deletes finished rows older than keep.
 func (s *MySQLStore) Prune(keep time.Duration) error {
-	return s.DB.Exec("DELETE FROM `"+TableOutbox+"` WHERE status <> 'pending' AND created_at < ?", time.Now().Add(-keep)).Error
+	return s.DB.Exec("DELETE FROM `"+s.Table+"` WHERE status <> 'pending' AND created_at < ?", time.Now().Add(-keep)).Error
 }
 
 func trunc(s string, n int) string {

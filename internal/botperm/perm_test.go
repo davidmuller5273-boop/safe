@@ -91,6 +91,17 @@ func TestFormatGroupCodeStateShowsAITron(t *testing.T) {
 	}
 }
 
+func TestFormatGroupCodeStateShowsAutoTron(t *testing.T) {
+	on := FormatGroupCodeState(domain.BotGroupSettings{EnableAutoTron: true})
+	off := FormatGroupCodeState(domain.BotGroupSettings{EnableAITron: true})
+	if !strings.Contains(on, "自动最优波场单双一分=true") || !strings.Contains(off, "自动最优波场单双一分=false") {
+		t.Fatalf("on=%q off=%q", on, off)
+	}
+	if strings.Contains(on, "AI波场单双一分=true") {
+		t.Fatalf("flags must be independent: %q", on)
+	}
+}
+
 func TestCodeModeUpsertSQL(t *testing.T) {
 	cases := []struct {
 		size    int

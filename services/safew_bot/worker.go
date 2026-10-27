@@ -55,16 +55,17 @@ func Run() error {
 	swClient := safew.NewClient(cfg.SafeWAPIBaseURL)
 	perms := botperm.NewStore(db, cfg.DeveloperUserIDs)
 	worker := worker{
-		db:     db,
-		queue:  drawQueue,
-		client: swClient,
-		perms:  perms,
-		lb:     newLotteryRuntime(lotterybroadcast.NewStore(db), lotterybroadcast.NewService(lotterybroadcast.SourcesFromEnv())),
-		aiTron: newAITronRunner(db, swClient, perms),
+		db:       db,
+		queue:    drawQueue,
+		client:   swClient,
+		perms:    perms,
+		lb:       newLotteryRuntime(lotterybroadcast.NewStore(db), lotterybroadcast.NewService(lotterybroadcast.SourcesFromEnv())),
+		aiTron:   newAITronRunner(db, swClient, perms),
+		autoTron: newAutoTronRunner(db, swClient, perms),
 	}
 	log.Printf("SafeW 机器人消息服务已启动 (developers=%d)", len(cfg.DeveloperUserIDs))
 
-	const workers = 6
+	const workers = 7
 	errCh := make(chan error, workers)
 	go func() { errCh <- worker.runQueue(ctx) }()
 	go func() { errCh <- worker.runCommands(ctx) }()
@@ -72,6 +73,7 @@ func Run() error {
 	go func() { errCh <- worker.runLotterySender(ctx) }()
 	go func() { errCh <- worker.runLotteryBackfiller(ctx) }()
 	go func() { errCh <- worker.runAITron(ctx) }()
+	go func() { errCh <- worker.runAutoTron(ctx) }()
 
 	var first error
 	for i := 0; i < workers; i++ {
@@ -84,12 +86,13 @@ func Run() error {
 }
 
 type worker struct {
-	db     *gorm.DB
-	queue  *queue.LotteryDrawQueueClient
-	client *safew.Client
-	perms  *botperm.Store
-	lb     *lotteryRuntime // 开奖播报 (nil disables it)
-	aiTron *aitron.Runner  // AI波场单双一分 broadcast (nil disables it)
+	db       *gorm.DB
+	queue    *queue.LotteryDrawQueueClient
+	client   *safew.Client
+	perms    *botperm.Store
+	lb       *lotteryRuntime // 开奖播报 (nil disables it)
+	aiTron   *aitron.Runner  // AI波场单双一分 broadcast (nil disables it)
+	autoTron *aitron.Runner  // 自动最优波场单双一分 broadcast (nil disables it)
 }
 
 func (w worker) runQueue(ctx context.Context) error {

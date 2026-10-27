@@ -16,17 +16,19 @@ import (
 	"time"
 )
 
+func intp(n int) *int { return &n }
+
 func TestFormatMatchesTemplate(t *testing.T) {
 	s := Snapshot{
 		NextBlock: 87473360, NextPick: Double, WindowPeriods: 180,
 		Window: Rate{Hits: 88, Total: 179}, Overall: Rate{Hits: 4402, Total: 8966},
-		StreakLoss: 1,
+		MaxWin: intp(5), MaxLoss: intp(4),
 		Recent: []Row{
 			{87473300, Double, Single},
 			{87473320, Single, Single},
 		},
 	}
-	got := Format(s)
+	got := Format(AI, s)
 	want := strings.Join([]string{
 		"<b>波场一分单双</b>",
 		"",
@@ -39,7 +41,7 @@ func TestFormatMatchesTemplate(t *testing.T) {
 		"本期预测：🔴双",
 		"<b>📊 周期胜率概览</b>",
 		"180期：49.2%（已预测 8966 期 49.1%）",
-		"近三小时连中 0✅ 连错 1❌",
+		"近三小时 最大连中 5✅ 最大连错 4❌",
 		"走势预测统计网址  188.ms",
 	}, "\n")
 	if got != want {
@@ -52,7 +54,7 @@ func TestFormatKeepsOnlyLast15AndNewestAtBottom(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		rows = append(rows, Row{Block: int64(1000 + 20*i), Result: Single, Pick: Single})
 	}
-	got := Format(Snapshot{NextBlock: 2000, NextPick: Single, Recent: rows})
+	got := Format(AI, Snapshot{NextBlock: 2000, NextPick: Single, Recent: rows})
 	lines := strings.Split(got, "\n")
 	var body []string
 	for _, l := range lines {
@@ -69,11 +71,11 @@ func TestFormatKeepsOnlyLast15AndNewestAtBottom(t *testing.T) {
 }
 
 func TestFormatNoDataAndTruncatedOverall(t *testing.T) {
-	got := Format(Snapshot{NextBlock: 20, NextPick: Single})
-	if !strings.Contains(got, "180期：--（已预测 0 期 --）") || !strings.Contains(got, "连中 0✅ 连错 0❌") {
+	got := Format(AI, Snapshot{NextBlock: 20, NextPick: Single})
+	if !strings.Contains(got, "180期：--（已预测 0 期 --）") || strings.Contains(got, "最大连中") || strings.Contains(got, "连中") {
 		t.Fatalf("empty format: %s", got)
 	}
-	got = Format(Snapshot{NextBlock: 20, NextPick: Single, Overall: Rate{Hits: 2500, Total: 5000}, OverallLimit: 5000})
+	got = Format(AI, Snapshot{NextBlock: 20, NextPick: Single, Overall: Rate{Hits: 2500, Total: 5000}, OverallLimit: 5000})
 	if !strings.Contains(got, "（近5000期 50.0%）") {
 		t.Fatalf("truncated format: %s", got)
 	}
@@ -82,6 +84,7 @@ func TestFormatNoDataAndTruncatedOverall(t *testing.T) {
 // ---- fake tg-directory-bot ----
 
 type fakeDraw struct {
+	windowMax bool // ai.window carries server-computed max_win / max_loss
 	periods   int  // number of recorded draws
 	aiFrom    int  // index of the first draw with a stored AI prediction
 	total     int  // total_recorded
@@ -115,6 +118,9 @@ func (f fakeDraw) json(aiLimit int) map[string]any {
 		return out
 	}
 	ai := map[string]any{"enabled": true, "next": nil, "trend": nil}
+	if f.windowMax {
+		ai["window"] = map[string]any{"limit": 180, "max_win": map[string]any{"len": 7, "start": 3}, "max_loss": 6}
+	}
 	if !f.noNext {
 		ai["next"] = map[string]any{"block": f.lastBlock + 20, "pick": Double}
 	}
@@ -138,7 +144,10 @@ func (f fakeDraw) json(aiLimit int) map[string]any {
 type fakeServer struct {
 	*httptest.Server
 	draw        fakeDraw
-	proposed    string // body for ProposedPath; "" = 404
+	proposed    string // body for the AI endpoint; "" = 404
+	auto        string // body for the auto endpoint; "" = 404
+	autoStatus  int    // when set, the auto endpoint answers this status
+	autoHit     atomic.Int32
 	heavyCalls  atomic.Int32
 	lightCalls  atomic.Int32
 	proposedHit atomic.Int32
@@ -147,13 +156,25 @@ type fakeServer struct {
 func newFakeServer(t *testing.T, d fakeDraw) *fakeServer {
 	fs := &fakeServer{draw: d}
 	mux := http.NewServeMux()
-	mux.HandleFunc(ProposedPath, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(AI.Path, func(w http.ResponseWriter, r *http.Request) {
 		fs.proposedHit.Add(1)
 		if fs.proposed == "" {
 			http.NotFound(w, r)
 			return
 		}
 		fmt.Fprint(w, fs.proposed)
+	})
+	mux.HandleFunc(Auto.Path, func(w http.ResponseWriter, r *http.Request) {
+		fs.autoHit.Add(1)
+		if fs.autoStatus != 0 {
+			http.Error(w, "boom", fs.autoStatus)
+			return
+		}
+		if fs.auto == "" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, fs.auto)
 	})
 	mux.HandleFunc("/api/tron-draw", func(w http.ResponseWriter, r *http.Request) {
 		aiLimit := 0
@@ -204,27 +225,27 @@ func TestFallbackDerivesEverythingFromExistingAPI(t *testing.T) {
 	if snap.OverallLimit != 5000 {
 		t.Fatalf("OverallLimit = %d, want 5000 (truncated)", snap.OverallLimit)
 	}
-	win, loss := 0, 0
-	for i := d.periods - 1; i >= 0; i-- {
-		ok := d.pick(i) == d.result(i)
-		if i == d.periods-1 {
-			if ok {
-				win = 1
-			} else {
-				loss = 1
-			}
-			continue
-		}
-		if ok && win > 0 {
-			win++
-		} else if !ok && loss > 0 {
-			loss++
-		} else {
-			break
-		}
+	// the old API has no window.max_win/max_loss: the line is omitted, never computed locally
+	if snap.MaxWin != nil || snap.MaxLoss != nil {
+		t.Fatalf("max streak must be absent in fallback without server values: %v %v", snap.MaxWin, snap.MaxLoss)
 	}
-	if snap.StreakWin != win || snap.StreakLoss != loss || (win == 0) == (loss == 0) {
-		t.Fatalf("streak = %d/%d want %d/%d", snap.StreakWin, snap.StreakLoss, win, loss)
+	if strings.Contains(Format(AI, *snap), "连中") {
+		t.Fatal("streak line must be omitted")
+	}
+}
+
+func TestFallbackUsesServerProvidedMaxStreak(t *testing.T) {
+	d := fakeDraw{periods: 300, total: 300, lastBlock: 87473340, windowMax: true}
+	fs := newFakeServer(t, d)
+	snap, err := NewClient(fs.URL).Fetch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.MaxWin == nil || snap.MaxLoss == nil || *snap.MaxWin != 7 || *snap.MaxLoss != 6 {
+		t.Fatalf("max = %v %v", snap.MaxWin, snap.MaxLoss)
+	}
+	if !strings.Contains(Format(AI, *snap), "近三小时 最大连中 7✅ 最大连错 6❌") {
+		t.Fatal(Format(AI, *snap))
 	}
 }
 
@@ -284,13 +305,13 @@ func TestProposedEndpointPreferredWhenPresent(t *testing.T) {
 	fs := newFakeServer(t, fakeDraw{periods: 30, total: 30, lastBlock: 1000})
 	fs.proposed = `{"enabled":true,"next_block":87473360,"next_pick":"双","latest_ts":0,
 	 "recent":[{"block":87473340,"result":"单","pick":"单"},{"block":87473320,"result":"双","pick":"单"}],
-	 "window":{"periods":180,"hits":88,"total":179},"overall":{"hits":4402,"total":8966},
+	 "window":{"periods":180,"hits":88,"total":179,"max_win":9,"max_loss":0},"overall":{"hits":4402,"total":8966},
 	 "streak":{"kind":"win","count":3}}`
 	snap, err := NewClient(fs.URL).Fetch(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snap.NextBlock != 87473360 || snap.Overall.Total != 8966 || snap.StreakWin != 3 || snap.StreakLoss != 0 || snap.OverallLimit != 0 {
+	if snap.NextBlock != 87473360 || snap.Overall.Total != 8966 || snap.MaxWin == nil || *snap.MaxWin != 9 || snap.MaxLoss == nil || *snap.MaxLoss != 0 || snap.OverallLimit != 0 {
 		t.Fatalf("snap = %+v", snap)
 	}
 	// only 2 recent rows from the endpoint (< HistoryRows) → the table is topped up
@@ -578,7 +599,7 @@ func TestRunnerDropsStaleQueuedPeriods(t *testing.T) {
 }
 
 func TestRunnerEndToEndWithFakeHTTPServer(t *testing.T) {
-	fs := newFakeServer(t, fakeDraw{periods: 400, total: 400, lastBlock: 87473340})
+	fs := newFakeServer(t, fakeDraw{periods: 400, total: 400, lastBlock: 87473340, windowMax: true})
 	st := &memStore{chats: []string{"-1001"}}
 	snd := &fakeSender{}
 	r := &Runner{Source: NewClient(fs.URL), Store: st, Sender: snd, Sleep: func(context.Context, time.Duration) bool { return true }}
@@ -589,7 +610,7 @@ func TestRunnerEndToEndWithFakeHTTPServer(t *testing.T) {
 		t.Fatalf("sent = %v", snd.sent)
 	}
 	msg := snd.sent["-1001"][0]
-	for _, want := range []string{"波场一分单双", "87473360 | ⏳待开奖 | 🔴双 | ⏳", "本期预测：🔴双", "180期：", "近三小时连", "188.ms"} {
+	for _, want := range []string{"波场一分单双", "87473360 | ⏳待开奖 | 🔴双 | ⏳", "本期预测：🔴双", "180期：", "近三小时 最大连中 7✅ 最大连错 6❌", "188.ms"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("missing %q in:\n%s", want, msg)
 		}
@@ -598,5 +619,149 @@ func TestRunnerEndToEndWithFakeHTTPServer(t *testing.T) {
 	r.Tick(context.Background())
 	if len(snd.sent["-1001"]) != 2 {
 		t.Fatalf("next period not sent: %d", len(snd.sent["-1001"]))
+	}
+}
+
+func TestProposedWithoutMaxStreakOmitsLine(t *testing.T) {
+	fs := newFakeServer(t, fakeDraw{periods: 30, total: 30, lastBlock: 1000})
+	for name, window := range map[string]string{
+		"neither":  `{"periods":180,"hits":88,"total":179}`,
+		"win only": `{"periods":180,"hits":88,"total":179,"max_win":4}`,
+		"null":     `{"periods":180,"hits":88,"total":179,"max_win":null,"max_loss":null}`,
+		"negative": `{"periods":180,"hits":88,"total":179,"max_win":-1,"max_loss":2}`,
+	} {
+		fs.proposed = `{"enabled":true,"next_block":87473360,"next_pick":"双","recent":[],"window":` + window +
+			`,"overall":{"hits":1,"total":2},"streak":{"kind":"win","count":3}}`
+		snap, err := NewClient(fs.URL).Fetch(context.Background())
+		if err != nil {
+			t.Fatal(name, err)
+		}
+		if msg := Format(AI, *snap); strings.Contains(msg, "连中") || strings.Contains(msg, "连错") {
+			t.Fatalf("%s: line must be omitted (old streak field must not be used):\n%s", name, msg)
+		}
+		if !strings.Contains(Format(AI, *snap), "180期：") {
+			t.Fatalf("%s: win-rate lines must stay", name)
+		}
+	}
+	// zero values are real values and are shown
+	fs.proposed = `{"enabled":true,"next_block":87473360,"next_pick":"双","recent":[],"window":{"periods":180,"hits":0,"total":0,"max_win":0,"max_loss":12},"overall":{"hits":0,"total":0}}`
+	snap, err := NewClient(fs.URL).Fetch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(Format(AI, *snap), "近三小时 最大连中 0✅ 最大连错 12❌") {
+		t.Fatal(Format(AI, *snap))
+	}
+}
+
+const autoBody = `{"enabled":true,"next_block":87473360,"next_pick":"单","latest_ts":0,
+ "recent":[{"block":87473340,"result":"单","pick":"单"},{"block":87473320,"result":"双","pick":"单"}],
+ "window":{"periods":180,"hits":100,"total":180,"max_win":8,"max_loss":5},"overall":{"hits":4000,"total":8000}}`
+
+func TestAutoEndpointUsesOwnPathAndTemplate(t *testing.T) {
+	fs := newFakeServer(t, fakeDraw{periods: 30, total: 30, lastBlock: 1000})
+	fs.auto = autoBody
+	snap, err := NewKindClient(fs.URL, Auto).Fetch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fs.autoHit.Load() != 1 || fs.proposedHit.Load() != 0 || fs.heavyCalls.Load()+fs.lightCalls.Load() != 0 {
+		t.Fatalf("auto must only call its own endpoint: auto=%d ai=%d", fs.autoHit.Load(), fs.proposedHit.Load())
+	}
+	if len(snap.Recent) != 2 { // no top-up from /api/tron-draw for auto
+		t.Fatalf("recent = %+v", snap.Recent)
+	}
+	got := Format(Auto, *snap)
+	want := strings.Join([]string{
+		"<b>波场一分单双</b>",
+		"",
+		"<b>自动最优预测（近15期）</b>",
+		"<pre>区块号 | 结果 | 预测 | 状态",
+		"87473320 | 🔴双 | 🟢单 | ❌",
+		"87473340 | 🟢单 | 🟢单 | ✅",
+		"87473360 | ⏳待开奖 | 🟢单 | ⏳</pre>",
+		"────────────────",
+		"本期预测：🟢单",
+		"<b>📊 周期胜率概览</b>",
+		"180期：55.6%（已预测 8000 期 50.0%）",
+		"近三小时 最大连中 8✅ 最大连错 5❌",
+		"走势预测统计网址  188.ms",
+	}, "\n")
+	if got != want {
+		t.Fatalf("--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+func TestAutoEndpointDisabledOr404IsUnavailableNoFallback(t *testing.T) {
+	fs := newFakeServer(t, fakeDraw{periods: 30, total: 30, lastBlock: 1000})
+	var ue *UnavailableError
+	// 404 (endpoint not shipped yet / stats page off)
+	_, err := NewKindClient(fs.URL, Auto).Fetch(context.Background())
+	if !errors.As(err, &ue) || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("404: err = %v", err)
+	}
+	if fs.heavyCalls.Load()+fs.lightCalls.Load() != 0 {
+		t.Fatal("auto must never fall back to /api/tron-draw")
+	}
+	fs.auto = `{"enabled":false,"reason":"自动最优 未开启"}`
+	_, err = NewKindClient(fs.URL, Auto).Fetch(context.Background())
+	if !errors.As(err, &ue) || !strings.Contains(err.Error(), "自动最优 未开启") {
+		t.Fatalf("disabled: err = %v", err)
+	}
+	fs.auto = `{"enabled":true,"next_block":87473360,"next_pick":null,"recent":[]}`
+	if _, err = NewKindClient(fs.URL, Auto).Fetch(context.Background()); !errors.Is(err, ErrPending) {
+		t.Fatalf("err = %v, want ErrPending", err)
+	}
+	fs.autoStatus = 500
+	if _, err = NewKindClient(fs.URL, Auto).Fetch(context.Background()); err == nil || errors.As(err, &ue) {
+		t.Fatalf("500 must be a plain transport-style error, got %v", err)
+	}
+}
+
+func TestAutoRunnerSendsOwnTemplateAndLogsEachReasonOnce(t *testing.T) {
+	fs := newFakeServer(t, fakeDraw{periods: 30, total: 30, lastBlock: 1000})
+	st := &memStore{chats: []string{"-1001"}}
+	snd := &fakeSender{}
+	r := &Runner{Kind: Auto, Source: NewKindClient(fs.URL, Auto), Store: st, Sender: snd, Sleep: func(context.Context, time.Duration) bool { return true }}
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(log.Writer())
+	ctx := context.Background()
+
+	for i := 0; i < 4; i++ { // 404
+		r.Tick(ctx)
+	}
+	fs.auto = `{"enabled":false,"reason":"自动最优 未开启"}`
+	for i := 0; i < 4; i++ { // enabled=false: a different reason, logged once more
+		r.Tick(ctx)
+	}
+	if len(snd.sent) != 0 {
+		t.Fatal("nothing may be sent while unavailable")
+	}
+	if n := strings.Count(buf.String(), "自动最优波场单双一分: 数据暂不可用"); n != 2 {
+		t.Fatalf("want one log line per reason (2), got %d:\n%s", n, buf.String())
+	}
+	fs.auto = autoBody
+	for i := 0; i < 3; i++ {
+		r.Tick(ctx)
+	}
+	if len(snd.sent["-1001"]) != 1 {
+		t.Fatalf("sent = %v", snd.sent)
+	}
+	if msg := snd.sent["-1001"][0]; !strings.Contains(msg, "自动最优预测（近15期）") || strings.Contains(msg, "AI预测") {
+		t.Fatalf("wrong template:\n%s", msg)
+	}
+	if !strings.Contains(buf.String(), "自动最优波场单双一分: 数据已恢复") {
+		t.Fatalf("recovery log missing:\n%s", buf.String())
+	}
+}
+
+func TestOutboxDDLIsPerKind(t *testing.T) {
+	ai, auto := OutboxDDL(AI.Table), OutboxDDL(Auto.Table)
+	if AI.Table == Auto.Table || !strings.Contains(ai, "`ai_tron_outbox`") || !strings.Contains(auto, "`auto_tron_outbox`") {
+		t.Fatalf("tables: %s / %s", AI.Table, Auto.Table)
+	}
+	if !strings.Contains(auto, "UNIQUE KEY `uk_tron_chat_block` (`chat_id`,`block`)") {
+		t.Fatalf("dedupe key missing: %s", auto)
 	}
 }

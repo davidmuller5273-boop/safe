@@ -49,6 +49,7 @@ type Sender interface {
 
 // Runner polls the source and fans each new period out to the enabled groups.
 type Runner struct {
+	Kind   Kind // which broadcast (zero value = AI)
 	Source Source
 	Store  Store
 	Sender Sender
@@ -63,6 +64,15 @@ type Runner struct {
 	enqueued        map[string]struct{} // chats already queued for enqueuedBlock
 	lastPrune       time.Time
 }
+
+func (r *Runner) kind() Kind {
+	if r.Kind.Key == "" {
+		return AI
+	}
+	return r.Kind
+}
+
+func (r *Runner) label() string { return r.kind().Name }
 
 func (r *Runner) now() time.Time {
 	if r.Now != nil {
@@ -104,7 +114,7 @@ func (r *Runner) Run(ctx context.Context) error {
 func (r *Runner) Tick(ctx context.Context) {
 	chats, err := r.Store.EnabledChats()
 	if err != nil {
-		log.Printf("AI波场单双一分: 读取已开启群失败: %v", err)
+		log.Printf("%s: 读取已开启群失败: %v", r.label(), err)
 	} else if len(chats) > 0 {
 		r.poll(ctx, chats)
 	}
@@ -112,7 +122,7 @@ func (r *Runner) Tick(ctx context.Context) {
 	if r.now().Sub(r.lastPrune) > pruneEvery {
 		r.lastPrune = r.now()
 		if err := r.Store.Prune(pruneKeepFor); err != nil {
-			log.Printf("AI波场单双一分: 清理旧记录失败: %v", err)
+			log.Printf("%s: 清理旧记录失败: %v", r.label(), err)
 		}
 	}
 }
@@ -141,13 +151,13 @@ func (r *Runner) poll(ctx context.Context, chats []string) {
 		r.enqueuedBlock = snap.NextBlock
 		r.enqueued = map[string]struct{}{}
 	}
-	body := Format(*snap)
+	body := Format(r.kind(), *snap)
 	for _, chat := range chats {
 		if _, done := r.enqueued[chat]; done {
 			continue
 		}
 		if _, err := r.Store.Enqueue(chat, snap.NextBlock, body); err != nil {
-			log.Printf("AI波场单双一分: 入队失败 chat=%s block=%d: %v", chat, snap.NextBlock, err)
+			log.Printf("%s: 入队失败 chat=%s block=%d: %v", r.label(), chat, snap.NextBlock, err)
 			continue
 		}
 		r.enqueued[chat] = struct{}{} // duplicates are rejected by the DB unique key too
@@ -156,14 +166,14 @@ func (r *Runner) poll(ctx context.Context, chats []string) {
 
 func (r *Runner) noteUnavailable(reason string) {
 	if reason != r.lastUnavailable {
-		log.Printf("AI波场单双一分: 数据暂不可用，跳过（同一原因不再重复记录）: %s", reason)
+		log.Printf("%s: 数据暂不可用，跳过（同一原因不再重复记录）: %s", r.label(), reason)
 		r.lastUnavailable = reason
 	}
 }
 
 func (r *Runner) noteHealthy() {
 	if r.lastUnavailable != "" {
-		log.Printf("AI波场单双一分: 数据已恢复")
+		log.Printf("%s: 数据已恢复", r.label())
 		r.lastUnavailable = ""
 	}
 }
@@ -171,7 +181,7 @@ func (r *Runner) noteHealthy() {
 func (r *Runner) flush(ctx context.Context) {
 	items, err := r.Store.Pending(flushBatch)
 	if err != nil {
-		log.Printf("AI波场单双一分: 读取待发队列失败: %v", err)
+		log.Printf("%s: 读取待发队列失败: %v", r.label(), err)
 		return
 	}
 	dead := map[string]struct{}{}
@@ -197,7 +207,7 @@ func (r *Runner) flush(ctx context.Context) {
 		cancel()
 		if err == nil {
 			if merr := r.Store.MarkSent(item.ID); merr != nil {
-				log.Printf("AI波场单双一分: 更新发送状态失败 id=%d: %v", item.ID, merr)
+				log.Printf("%s: 更新发送状态失败 id=%d: %v", r.label(), item.ID, merr)
 			}
 			continue
 		}
@@ -205,15 +215,15 @@ func (r *Runner) flush(ctx context.Context) {
 			return
 		}
 		if safew.IsPermanentChatError(err) {
-			log.Printf("AI波场单双一分: 群不可达（永久错误），关闭该群播报 chat=%s block=%d: %v", item.ChatID, item.Block, err)
+			log.Printf("%s: 群不可达（永久错误），关闭该群播报 chat=%s block=%d: %v", r.label(), item.ChatID, item.Block, err)
 			_ = r.Store.MarkFailed(item.ID, err.Error())
 			if derr := r.Store.DisableChat(item.ChatID); derr != nil {
-				log.Printf("AI波场单双一分: 关闭群播报失败 chat=%s: %v", item.ChatID, derr)
+				log.Printf("%s: 关闭群播报失败 chat=%s: %v", r.label(), item.ChatID, derr)
 			}
 			dead[item.ChatID] = struct{}{}
 			continue
 		}
-		log.Printf("AI波场单双一分: 发送失败(%d/%d) chat=%s block=%d: %v", item.Attempts+1, MaxSendAttempts, item.ChatID, item.Block, err)
+		log.Printf("%s: 发送失败(%d/%d) chat=%s block=%d: %v", r.label(), item.Attempts+1, MaxSendAttempts, item.ChatID, item.Block, err)
 		_ = r.Store.MarkAttemptFailed(item.ID, err.Error(), MaxSendAttempts)
 	}
 }
