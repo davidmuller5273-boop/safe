@@ -199,16 +199,19 @@ func (w worker) renderPredictionHistory(lotteryTypeID uint, lotteryName string, 
 		position = hotnumber.PositionChampion
 	}
 	var predictions []domain.HotNumberPrediction
-	// Include the next, unevaluated prediction. Fetch one extra row so the
-	// statistics can still cover 180 completed issues.
+	// Only the rows shown in the table (incl. the next, unevaluated prediction)
+	// are read from the predictions table. The 30/180-issue statistics are NOT
+	// taken from stored predictions or running counters; they are recomputed
+	// from the raw draw records below on every render.
 	if err := w.db.Where("lottery_type_id = ? AND code_size = ? AND position = ?", lotteryTypeID, size, position).
-		Order("issue_number DESC").Limit(181).Find(&predictions).Error; err != nil {
+		Order("issue_number DESC").Limit(predictionTableRows).Find(&predictions).Error; err != nil {
 		return "", err
 	}
 	var records []domain.DrawRecord
-	// Fetch enough raw draws to rebuild all displayed/statistical predictions,
-	// including extra rows needed when finish-place numbers repeat.
-	if err := w.db.Where("lottery_type_id = ?", lotteryTypeID).Order("issue_number DESC").Limit(1000).Find(&records).Error; err != nil {
+	// Fetch enough raw draws to rebuild all displayed/statistical predictions
+	// (statsWindow issues plus the look-back each one needs, including extra
+	// rows needed when finish-place numbers repeat).
+	if err := w.db.Where("lottery_type_id = ?", lotteryTypeID).Order("issue_number DESC").Limit(drawRecordFetchLimit).Find(&records).Error; err != nil {
 		return "", err
 	}
 	recordsByIssue := make(map[string]domain.DrawRecord, len(records))
@@ -254,13 +257,10 @@ func (w worker) renderPredictionHistory(lotteryTypeID uint, lotteryName string, 
 			predictions[i].Correct = &correct
 		}
 	}
-	tablePredictions := predictions
-	if len(tablePredictions) > 20 {
-		tablePredictions = tablePredictions[:20]
-	}
-	table := renderPredictionTable(tablePredictions, size, position)
-	stats30 := calculateStats(predictions, 30)
-	stats180 := calculateStats(predictions, 180)
+	table := renderPredictionTable(predictions, size, position)
+	outcomes := windowOutcomes(records, size, position, statsWindow)
+	stats30 := statsFromOutcomes(outcomes, 30)
+	stats180 := statsFromOutcomes(outcomes, statsWindow)
 	return buildPredictionMessage(lotteryName, size, position, table, stats30, stats180), nil
 }
 
@@ -289,27 +289,70 @@ func buildPredictionMessage(lotteryName string, size, position int, table string
 	)
 }
 
+const (
+	// statsWindow is the number of most recent draw issues (1 issue/minute,
+	// so 180 issues = 3 hours) used for the win-rate and streak statistics.
+	statsWindow = 180
+	// predictionTableRows is the number of rows shown in the history table.
+	predictionTableRows = 20
+	// drawRecordFetchLimit bounds how many raw draws are loaded per render.
+	drawRecordFetchLimit = 1000
+)
+
 type predictionStats struct {
 	WinRate       float64
 	MaxWinStreak  int
 	MaxLossStreak int
 }
 
-func calculateStats(predictions []domain.HotNumberPrediction, limit int) predictionStats {
-	stats := predictionStats{}
-	wins := 0
-	winStreak := 0
-	lossStreak := 0
-	evaluated := 0
-	for _, prediction := range predictions {
-		if prediction.Correct == nil {
+// windowOutcomes re-evaluates the last `window` draw issues from raw draw
+// records only (records must be newest-first). For every issue the hot numbers
+// are rebuilt from the draws strictly before it, exactly like the live
+// prediction, and compared with that issue's actual number at `position`.
+// The result is newest-first: true = hit (✅), false = miss (❌).
+// Issues without enough earlier history (or with an unreadable result) are
+// skipped, so fewer than `window` outcomes may be returned.
+func windowOutcomes(records []domain.DrawRecord, size, position, window int) []bool {
+	if size <= 0 {
+		size = hotnumber.Size
+	}
+	if position <= 0 {
+		position = hotnumber.PositionChampion
+	}
+	outcomes := make([]bool, 0, window)
+	for i := 0; i < len(records) && len(outcomes) < window; i++ {
+		record := records[i]
+		var result []string
+		if err := json.Unmarshal([]byte(record.DrawResult), &result); err != nil {
 			continue
 		}
-		if evaluated == limit {
+		actual, err := hotnumber.FromDrawResultAt(result, position)
+		if err != nil {
+			continue
+		}
+		numbers, err := hotNumbersFromRecords(records[i+1:], record.IssueNumber, size, position)
+		if err != nil {
+			continue
+		}
+		if len(numbers) < size {
+			// Not enough earlier draws; older issues will not have any either.
 			break
 		}
-		evaluated++
-		if *prediction.Correct {
+		outcomes = append(outcomes, hotnumber.Contains(numbers, actual))
+	}
+	return outcomes
+}
+
+// statsFromOutcomes computes win rate and the longest win/loss streaks over the
+// newest `limit` outcomes (newest-first). Fewer outcomes are handled gracefully.
+func statsFromOutcomes(outcomes []bool, limit int) predictionStats {
+	stats := predictionStats{}
+	if limit > 0 && len(outcomes) > limit {
+		outcomes = outcomes[:limit]
+	}
+	wins, winStreak, lossStreak := 0, 0, 0
+	for _, hit := range outcomes {
+		if hit {
 			wins++
 			winStreak++
 			lossStreak = 0
@@ -324,10 +367,26 @@ func calculateStats(predictions []domain.HotNumberPrediction, limit int) predict
 			}
 		}
 	}
-	if evaluated > 0 {
-		stats.WinRate = float64(wins) * 100 / float64(evaluated)
+	if len(outcomes) > 0 {
+		stats.WinRate = float64(wins) * 100 / float64(len(outcomes))
 	}
 	return stats
+}
+
+// calculateStats derives stats from stored predictions (newest first, pending
+// ones skipped). Kept for callers/tests; the broadcast message no longer uses it.
+func calculateStats(predictions []domain.HotNumberPrediction, limit int) predictionStats {
+	outcomes := make([]bool, 0, len(predictions))
+	for _, prediction := range predictions {
+		if prediction.Correct == nil {
+			continue
+		}
+		if len(outcomes) == limit {
+			break
+		}
+		outcomes = append(outcomes, *prediction.Correct)
+	}
+	return statsFromOutcomes(outcomes, limit)
 }
 
 // renderPredictionTable receives predictions queried newest-first and renders

@@ -40,7 +40,6 @@ func TestFormatMatchesTemplate(t *testing.T) {
 		"<b>📊 周期胜率概览</b>",
 		"180期：49.2%（已预测 8966 期 49.1%）",
 		"近三小时连中 0✅ 连错 1❌",
-		"走势预测统计网址  188.ms",
 	}, "\n")
 	if got != want {
 		t.Fatalf("Format mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
@@ -587,7 +586,10 @@ func TestRunnerEndToEndWithFakeHTTPServer(t *testing.T) {
 		t.Fatalf("sent = %v", snd.sent)
 	}
 	msg := snd.sent["-1001"][0]
-	for _, want := range []string{"波场一分单双", "87473360 | ⏳待开奖 | 🔴双 | ⏳", "本期预测：🔴双", "180期：", "近三小时连", "188.ms"} {
+	if strings.Contains(msg, "188.ms") || strings.Contains(msg, "网址") {
+		t.Fatalf("default template must not contain ad/branding text:\n%s", msg)
+	}
+	for _, want := range []string{"波场一分单双", "87473360 | ⏳待开奖 | 🔴双 | ⏳", "本期预测：🔴双", "180期：", "近三小时连"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("missing %q in:\n%s", want, msg)
 		}

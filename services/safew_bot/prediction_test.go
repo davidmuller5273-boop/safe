@@ -2,6 +2,7 @@ package safewbot
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -275,5 +276,86 @@ func TestGroupPushJobsIndependent(t *testing.T) {
 	// All off → empty (sendToChats skips).
 	if jobs = groupPushJobs(domain.BotGroupSettings{PushEnabled: true}); len(jobs) != 0 {
 		t.Fatalf("expected empty jobs, got %+v", jobs)
+	}
+}
+
+// makeDraws builds newest-first draw records whose champion number is firsts[i]
+// (firsts[0] is the newest issue).
+func makeDraws(firsts []string) []domain.DrawRecord {
+	records := make([]domain.DrawRecord, 0, len(firsts))
+	for i, first := range firsts {
+		result, _ := json.Marshal([]string{first, "02"})
+		records = append(records, domain.DrawRecord{
+			IssueNumber: fmt.Sprintf("%010d", 2609060000+len(firsts)-i),
+			DrawResult:  string(result),
+		})
+	}
+	return records
+}
+
+func TestWindowOutcomesFromRawDraws(t *testing.T) {
+	// Oldest -> newest champions: 01 02 03 04 05 06 07 08 09 01.
+	// Hot numbers (size 6) of an issue = the 6 most recent distinct champions
+	// before it. Issues 01/09/08/07 each miss; older ones lack 6 earlier numbers.
+	newestFirst := []string{"01", "09", "08", "07", "06", "05", "04", "03", "02", "01"}
+	got := windowOutcomes(makeDraws(newestFirst), hotnumber.Size6, hotnumber.PositionChampion, 180)
+	want := []bool{false, false, false, false}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("windowOutcomes = %v, want %v", got, want)
+	}
+}
+
+func TestWindowOutcomesHitAndStreaks(t *testing.T) {
+	// Oldest -> newest champions: 1 2 3 4 5 6 6 6 1 7 7.
+	// Newest first: 7 hit (prev 7,1,6,5,4,3), 7 miss (prev 1,6,5,4,3,2), 1 hit,
+	// 6 hit, 6 hit; the remaining 6 has only 5 earlier distinct numbers -> stop.
+	newestFirst := []string{"7", "7", "1", "6", "6", "6", "5", "4", "3", "2", "1"}
+	records := makeDraws(newestFirst)
+	outcomes := windowOutcomes(records, hotnumber.Size6, hotnumber.PositionChampion, 180)
+	want := []bool{true, false, true, true, true}
+	if !reflect.DeepEqual(outcomes, want) {
+		t.Fatalf("windowOutcomes = %v, want %v", outcomes, want)
+	}
+	stats := statsFromOutcomes(outcomes, 180)
+	if stats.MaxWinStreak != 3 || stats.MaxLossStreak != 1 || stats.WinRate != 80 {
+		t.Fatalf("stats = %+v", stats)
+	}
+}
+
+func TestWindowOutcomesCapsAtWindowAndHandlesShortHistory(t *testing.T) {
+	if got := windowOutcomes(nil, hotnumber.Size6, hotnumber.PositionChampion, 180); len(got) != 0 {
+		t.Fatalf("empty history outcomes = %v", got)
+	}
+	if stats := statsFromOutcomes(nil, 180); stats != (predictionStats{}) {
+		t.Fatalf("empty stats = %+v", stats)
+	}
+	firsts := make([]string, 400)
+	for i := range firsts {
+		firsts[i] = fmt.Sprintf("%d", i%9+1)
+	}
+	records := makeDraws(firsts)
+	got := windowOutcomes(records, hotnumber.Size6, hotnumber.PositionChampion, 180)
+	if len(got) != 180 {
+		t.Fatalf("window not capped at 180: %d", len(got))
+	}
+	if short := windowOutcomes(records[:50], hotnumber.Size6, hotnumber.PositionChampion, 180); len(short) != 50-6 {
+		t.Fatalf("short history outcomes = %d, want %d", len(short), 50-6)
+	}
+}
+
+func TestWindowOutcomesRunnerUpUsesSecondPlace(t *testing.T) {
+	records := make([]domain.DrawRecord, 0, 12)
+	// Champion is always 01 (never 6 distinct numbers); runner-up cycles 1..9.
+	for i := 0; i < 12; i++ {
+		result, _ := json.Marshal([]string{"01", fmt.Sprintf("%02d", i%9+1)})
+		records = append(records, domain.DrawRecord{IssueNumber: fmt.Sprintf("%010d", 2609060100-i), DrawResult: string(result)})
+	}
+	champion := windowOutcomes(records, hotnumber.Size6, hotnumber.PositionChampion, 180)
+	runner := windowOutcomes(records, hotnumber.Size6, hotnumber.PositionRunnerUp, 180)
+	if len(champion) != 0 {
+		t.Fatalf("champion outcomes = %v, want none (only one distinct number)", champion)
+	}
+	if len(runner) == 0 {
+		t.Fatal("runner-up outcomes missing")
 	}
 }
