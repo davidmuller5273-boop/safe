@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/davidmuller5273-boop/safe/internal/ads"
+	"github.com/davidmuller5273-boop/safe/internal/aitron"
 	"github.com/davidmuller5273-boop/safe/internal/botperm"
 	"github.com/davidmuller5273-boop/safe/internal/config"
 	"github.com/davidmuller5273-boop/safe/internal/domain"
@@ -51,22 +52,26 @@ func Run() error {
 	if err := drawQueue.Recover(ctx); err != nil {
 		return err
 	}
+	swClient := safew.NewClient(cfg.SafeWAPIBaseURL)
+	perms := botperm.NewStore(db, cfg.DeveloperUserIDs)
 	worker := worker{
 		db:     db,
 		queue:  drawQueue,
-		client: safew.NewClient(cfg.SafeWAPIBaseURL),
-		perms:  botperm.NewStore(db, cfg.DeveloperUserIDs),
+		client: swClient,
+		perms:  perms,
 		lb:     newLotteryRuntime(lotterybroadcast.NewStore(db), lotterybroadcast.NewService(lotterybroadcast.SourcesFromEnv())),
+		aiTron: newAITronRunner(db, swClient, perms),
 	}
 	log.Printf("SafeW 机器人消息服务已启动 (developers=%d)", len(cfg.DeveloperUserIDs))
 
-	const workers = 5
+	const workers = 6
 	errCh := make(chan error, workers)
 	go func() { errCh <- worker.runQueue(ctx) }()
 	go func() { errCh <- worker.runCommands(ctx) }()
 	go func() { errCh <- worker.runLotteryPoller(ctx) }()
 	go func() { errCh <- worker.runLotterySender(ctx) }()
 	go func() { errCh <- worker.runLotteryBackfiller(ctx) }()
+	go func() { errCh <- worker.runAITron(ctx) }()
 
 	var first error
 	for i := 0; i < workers; i++ {
@@ -84,6 +89,7 @@ type worker struct {
 	client *safew.Client
 	perms  *botperm.Store
 	lb     *lotteryRuntime // 开奖播报 (nil disables it)
+	aiTron *aitron.Runner  // AI波场单双一分 broadcast (nil disables it)
 }
 
 func (w worker) runQueue(ctx context.Context) error {

@@ -131,6 +131,7 @@ type BotGroupSettings struct {
 	Enable7Code         bool      `json:"enable_7_code" gorm:"column:enable_7_code;not null;default:false"`
 	EnableRunnerUp6Code bool      `json:"enable_runner_up_6_code" gorm:"column:enable_runner_up_6_code;not null;default:false"`
 	EnableRunnerUp7Code bool      `json:"enable_runner_up_7_code" gorm:"column:enable_runner_up_7_code;not null;default:false"`
+	EnableAITron        bool      `json:"enable_ai_tron" gorm:"column:enable_ai_tron;not null;default:false"` // /开启AI波场单双一分
 	CreatedAt           time.Time `json:"created_at"`
 	UpdatedAt           time.Time `json:"updated_at"`
 }

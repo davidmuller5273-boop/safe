@@ -67,6 +67,7 @@ func ensureBotGroupSettingsSchema(db *gorm.DB) error {
 		{"Enable7Code", "ALTER TABLE `bot_group_settings` ADD COLUMN `enable_7_code` tinyint(1) NOT NULL DEFAULT 0"},
 		{"EnableRunnerUp6Code", "ALTER TABLE `bot_group_settings` ADD COLUMN `enable_runner_up_6_code` tinyint(1) NOT NULL DEFAULT 0"},
 		{"EnableRunnerUp7Code", "ALTER TABLE `bot_group_settings` ADD COLUMN `enable_runner_up_7_code` tinyint(1) NOT NULL DEFAULT 0"},
+		{"EnableAITron", "ALTER TABLE `bot_group_settings` ADD COLUMN `enable_ai_tron` tinyint(1) NOT NULL DEFAULT 0"},
 	}
 	for _, c := range cols {
 		if db.Migrator().HasColumn(&domain.BotGroupSettings{}, c.field) {

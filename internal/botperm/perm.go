@@ -523,17 +523,18 @@ func (s *Store) GetGroupSettings(chatID string) (domain.BotGroupSettings, error)
 	var (
 		row                  domain.BotGroupSettings
 		push, e6, e7, r6, r7 int
+		aiTron               int
 		title, user, ctype   sql.NullString
 		created, updated     sql.NullTime
 	)
 	err := s.DB.Raw(`
 SELECT id, chat_id, title, username, chat_type,
        push_enabled, enable_6_code, enable_7_code,
-       enable_runner_up_6_code, enable_runner_up_7_code,
+       enable_runner_up_6_code, enable_runner_up_7_code, enable_ai_tron,
        created_at, updated_at
 FROM bot_group_settings WHERE chat_id=?`, chatID).Row().Scan(
 		&row.ID, &row.ChatID, &title, &user, &ctype,
-		&push, &e6, &e7, &r6, &r7, &created, &updated,
+		&push, &e6, &e7, &r6, &r7, &aiTron, &created, &updated,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.BotGroupSettings{ChatID: chatID}, nil
@@ -553,6 +554,7 @@ FROM bot_group_settings WHERE chat_id=?`, chatID).Row().Scan(
 	row.Enable7Code = e7 != 0
 	row.EnableRunnerUp6Code = r6 != 0
 	row.EnableRunnerUp7Code = r7 != 0
+	row.EnableAITron = aiTron != 0
 	if created.Valid {
 		row.CreatedAt = created.Time
 	}
@@ -565,11 +567,12 @@ FROM bot_group_settings WHERE chat_id=?`, chatID).Row().Scan(
 // FormatGroupCodeState summarizes push / champion / runner-up flags and effective send modes.
 func FormatGroupCodeState(row domain.BotGroupSettings) string {
 	return fmt.Sprintf(
-		"push=%v enable_6=%v enable_7=%v enable_亚军6=%v enable_亚军7=%v（生效推送: 冠军6码=%v 冠军7码=%v 亚军6码=%v 亚军7码=%v）",
+		"push=%v enable_6=%v enable_7=%v enable_亚军6=%v enable_亚军7=%v（生效推送: 冠军6码=%v 冠军7码=%v 亚军6码=%v 亚军7码=%v）AI波场单双一分=%v",
 		row.PushEnabled, row.Enable6Code, row.Enable7Code,
 		row.EnableRunnerUp6Code, row.EnableRunnerUp7Code,
 		Effective6Code(row), Effective7Code(row),
 		EffectiveRunnerUp6Code(row), EffectiveRunnerUp7Code(row),
+		row.EnableAITron,
 	)
 }
 
@@ -673,4 +676,42 @@ func (s *Store) DeleteMember(chatID, userID string) error {
 		return nil
 	}
 	return s.DB.Where("chat_id = ? AND user_id = ?", chatID, userID).Delete(&domain.BotGroupMember{}).Error
+}
+
+// SetAITronEnabled turns the per-group 「AI波场单双一分」 broadcast on/off
+// (/开启AI波场单双一分, /关闭AI波场单双一分). It is independent of push_enabled
+// and of the champion/runner-up code flags. A missing row is created; the
+// result is verified with a raw int scan like SetCodeMode.
+func (s *Store) SetAITronEnabled(chatID string, enabled bool) error {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return errors.New("chat_id 不能为空")
+	}
+	v := 0
+	if enabled {
+		v = 1
+	}
+	if err := s.DB.Exec(`
+INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+  enable_runner_up_6_code, enable_runner_up_7_code, enable_ai_tron, created_at, updated_at)
+VALUES (?, 0, 0, 0, 0, 0, ?, NOW(3), NOW(3))
+ON DUPLICATE KEY UPDATE enable_ai_tron=VALUES(enable_ai_tron), updated_at=NOW(3)
+`, chatID, v).Error; err != nil {
+		return err
+	}
+	var got int
+	if err := s.DB.Raw(`SELECT enable_ai_tron FROM bot_group_settings WHERE chat_id=?`, chatID).Row().Scan(&got); err != nil {
+		return err
+	}
+	if (got != 0) != enabled {
+		return fmt.Errorf("SetAITronEnabled: 写入后状态不符 (chat_id=%s want=%v got=%d)", chatID, enabled, got)
+	}
+	return nil
+}
+
+// ListAITronChatIDs returns the chats with the AI波场单双一分 broadcast enabled.
+func (s *Store) ListAITronChatIDs() ([]string, error) {
+	var ids []string
+	err := s.DB.Raw(`SELECT chat_id FROM bot_group_settings WHERE enable_ai_tron = 1 ORDER BY id`).Scan(&ids).Error
+	return ids, err
 }

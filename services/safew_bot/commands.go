@@ -107,6 +107,10 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 		return err
 	}
 
+	if enabled, ok := aiTronCommand(cmd, args); ok {
+		return w.cmdSetAITron(ctx, botConfig, userID, chatID, enabled)
+	}
+
 	switch cmd {
 	case "/help", "/start", "/菜单", "/menu", "/帮助":
 		return w.sendPanel(ctx, botConfig.Token, msg.Chat, userID, role)

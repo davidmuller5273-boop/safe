@@ -40,6 +40,10 @@ const (
 /关闭6码 — 关闭冠军6码
 /关闭7码 — 关闭冠军7码`
 
+	helpAITron = `【AI波场单双一分】
+/开启AI波场单双一分 — 本群每期开奖后播报 AI 预测（约1分钟一条）
+/关闭AI波场单双一分 — 关闭本群该播报`
+
 	helpRunnerUp = `【亚军】
 /开启亚军6码 — 只推亚军6码
 /开启亚军7码 — 只推亚军7码
@@ -60,7 +64,7 @@ func helpForRole(role string) string {
 	switch role {
 	case botperm.RoleDeveloper, botperm.RoleAdmin:
 		title = "📖 使用帮助（" + botperm.RoleLabel(role) + "）"
-		sections = append(sections, helpPush, helpChampion, helpRunnerUp, helpLottery, helpAds, helpGroupAdmins)
+		sections = append(sections, helpPush, helpChampion, helpRunnerUp, helpAITron, helpLottery, helpAds, helpGroupAdmins)
 		footer = "进群默认不推送；开启冠军/亚军任一码会自动开推送，冠军与亚军互不影响。\n" + footer
 	case botperm.RoleGroupAdmin:
 		title = "📖 使用帮助（群管理员）"

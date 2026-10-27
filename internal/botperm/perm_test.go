@@ -83,6 +83,14 @@ func TestFormatGroupCodeState(t *testing.T) {
 	}
 }
 
+func TestFormatGroupCodeStateShowsAITron(t *testing.T) {
+	on := FormatGroupCodeState(domain.BotGroupSettings{EnableAITron: true})
+	off := FormatGroupCodeState(domain.BotGroupSettings{})
+	if !strings.Contains(on, "AI波场单双一分=true") || !strings.Contains(off, "AI波场单双一分=false") {
+		t.Fatalf("on=%q off=%q", on, off)
+	}
+}
+
 func TestCodeModeUpsertSQL(t *testing.T) {
 	cases := []struct {
 		size    int
