@@ -37,7 +37,7 @@ type Settings struct {
 // LoadForChat returns the chat's OWN ads only. There is no global fallback:
 // a chat without its own prefix/suffix gets empty Settings (Scope "none"), and
 // Wrap then sends just the body.
-func LoadForChat(db *gorm.DB, chatID string) (Settings, error) {
+func LoadForChat(db *gorm.DB, botID, chatID string) (Settings, error) {
 	chatID = strings.TrimSpace(chatID)
 	none := Settings{Scope: "none", ChatID: chatID}
 	if chatID == "" {
@@ -46,7 +46,7 @@ func LoadForChat(db *gorm.DB, chatID string) (Settings, error) {
 	var group domain.BotGroupAd
 	// Quiet: a missing group row is the normal "no ads" case.
 	err := db.Session(&gorm.Session{Logger: logger.Default.LogMode(logger.Silent)}).
-		Where("chat_id = ?", chatID).First(&group).Error
+		Where("bot_id = ? AND chat_id = ?", botID, chatID).First(&group).Error
 	if err == gorm.ErrRecordNotFound {
 		return none, nil
 	}
@@ -83,13 +83,13 @@ func SplitPrefixSuffix(text string) (prefix, suffix string, ok bool) {
 	return "", "", false
 }
 
-func SaveGroup(db *gorm.DB, chatID string, prefix, suffix *string) error {
+func SaveGroup(db *gorm.DB, botID, chatID string, prefix, suffix *string) error {
 	chatID = strings.TrimSpace(chatID)
 	if chatID == "" {
 		return errors.New("chat_id 不能为空")
 	}
 	var row domain.BotGroupAd
-	err := db.Where("chat_id = ?", chatID).FirstOrCreate(&row, domain.BotGroupAd{ChatID: chatID}).Error
+	err := db.Where("bot_id = ? AND chat_id = ?", botID, chatID).FirstOrCreate(&row, domain.BotGroupAd{BotID: botID, ChatID: chatID}).Error
 	if err != nil {
 		return err
 	}
@@ -106,13 +106,13 @@ func SaveGroup(db *gorm.DB, chatID string, prefix, suffix *string) error {
 	return db.Model(&row).Updates(updates).Error
 }
 
-func ClearGroup(db *gorm.DB, chatID string) error {
-	return db.Where("chat_id = ?", strings.TrimSpace(chatID)).Delete(&domain.BotGroupAd{}).Error
+func ClearGroup(db *gorm.DB, botID, chatID string) error {
+	return db.Where("bot_id = ? AND chat_id = ?", botID, strings.TrimSpace(chatID)).Delete(&domain.BotGroupAd{}).Error
 }
 
 // Wrap loads the chat's own ads (never a global ad) and builds a single outbound text.
-func Wrap(db *gorm.DB, chatID, body string) (string, error) {
-	s, err := LoadForChat(db, chatID)
+func Wrap(db *gorm.DB, botID, chatID, body string) (string, error) {
+	s, err := LoadForChat(db, botID, chatID)
 	if err != nil {
 		return "", err
 	}

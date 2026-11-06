@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/davidmuller5273-boop/safe/internal/botclone"
+	"github.com/davidmuller5273-boop/safe/internal/botscope"
 	"github.com/davidmuller5273-boop/safe/internal/domain"
 	"github.com/davidmuller5273-boop/safe/internal/lotterybroadcast"
 	"golang.org/x/crypto/bcrypt"
@@ -19,6 +21,11 @@ func Open(host string, port int, user, password, database string) (*gorm.DB, err
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
 	if err != nil {
 		return nil, err
+	}
+	// Existing installs: add bot_id + scoped unique keys before AutoMigrate, so
+	// the old chat_id-only unique keys are replaced without a gap.
+	if err = botscope.EnsureSchema(db); err != nil {
+		return nil, fmt.Errorf("bot_id 表结构迁移失败: %w", err)
 	}
 	if err = db.AutoMigrate(
 		&domain.Admin{},
@@ -46,6 +53,13 @@ func Open(host string, port int, user, password, database string) (*gorm.DB, err
 	// Non-fatal so a lottery-broadcast schema problem can never stop the other services.
 	if err = lotterybroadcast.EnsureSchema(db); err != nil {
 		log.Printf("开奖播报表结构检查失败（开奖播报功能暂不可用，其他功能不受影响）: %v", err)
+	}
+	// 多机器人隔离：每张按群存储的表加 bot_id，唯一键改为 (bot_id, chat_id, …)。
+	if err = botscope.EnsureSchema(db); err != nil {
+		return nil, fmt.Errorf("bot_id 表结构迁移失败: %w", err)
+	}
+	if err = botclone.EnsureSchema(db); err != nil {
+		return nil, fmt.Errorf("bot_clones 表创建失败: %w", err)
 	}
 	return db, seed(db)
 }

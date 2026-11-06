@@ -10,6 +10,7 @@ import (
 	"github.com/davidmuller5273-boop/safe/internal/ads"
 	"github.com/davidmuller5273-boop/safe/internal/aitron"
 	"github.com/davidmuller5273-boop/safe/internal/botperm"
+	"github.com/davidmuller5273-boop/safe/internal/botscope"
 	"github.com/davidmuller5273-boop/safe/internal/platform/safew"
 	"github.com/davidmuller5273-boop/safe/internal/systemconfig"
 
@@ -103,26 +104,66 @@ func (w worker) applyTron(chatID string, enabled, auto bool) (text, toast string
 
 // aiTronSender delivers one broadcast: the group's ads are wrapped around the
 // (already HTML-escaped) body and the message is sent silently, not pinned.
+// chatKey is a botscope key ("bot|chat"): each group is sent by its own bot.
 type aiTronSender struct {
 	db      *gorm.DB
-	client  *safew.Client
+	reg     *registry
 	withAds bool
 }
 
-func (s aiTronSender) Send(ctx context.Context, chatID, body string) error {
-	botConfig, err := systemconfig.LoadSafeW(s.db)
-	if err != nil {
-		return fmt.Errorf("等待 SafeW 配置: %w", err)
+func (s aiTronSender) Send(ctx context.Context, chatKey, body string) error {
+	botID, chatID := botscope.Split(chatKey)
+	inst := s.reg.get(botID)
+	if inst == nil {
+		return fmt.Errorf("机器人 %s 未在运行", botID)
+	}
+	token := inst.token
+	if inst.IsMother {
+		botConfig, err := systemconfig.LoadSafeW(s.db)
+		if err != nil {
+			return fmt.Errorf("等待 SafeW 配置: %w", err)
+		}
+		token = botConfig.Token
 	}
 	text := body
 	if s.withAds {
-		text, err = ads.Wrap(s.db, chatID, body)
+		var err error
+		text, err = ads.Wrap(s.db, botID, chatID, body)
 		if err != nil {
 			return err
 		}
 	}
-	_, err = s.client.SendMessageEx(ctx, botConfig.Token, chatID, text, safew.SendOptions{DisableNotification: true})
+	_, err := inst.client.SendMessageEx(ctx, token, chatID, text, safew.SendOptions{DisableNotification: true})
 	return err
+}
+
+// tronLister lists botscope keys of running bots' chats with the flag on.
+func tronLister(reg *registry, perms *botperm.Store, col string) func() ([]string, error) {
+	return func() ([]string, error) {
+		keys, err := perms.ListBroadcastFlagKeysAllBots(col)
+		if err != nil {
+			return nil, err
+		}
+		out := keys[:0]
+		for _, k := range keys {
+			if b, _ := botscope.Split(k); reg.running(b) {
+				out = append(out, k)
+			}
+		}
+		return out, nil
+	}
+}
+
+// tronSetter writes the flag for a botscope key on its own bot.
+func tronSetter(perms *botperm.Store, auto bool) func(string, bool) error {
+	return func(key string, on bool) error {
+		botID, chatID := botscope.Split(key)
+		p := perms.ForBot(botID, false)
+		if auto {
+			return p.SetAutoTronEnabled(chatID, on)
+		}
+		return p.SetAITronEnabled(chatID, on)
+	}
 }
 
 // tronEnvOff reports whether an env switch (e.g. AI_TRON_ENABLED) is 0/false/off.
@@ -135,20 +176,20 @@ func tronEnvOff(name string) bool {
 //
 // Environment: AI_TRON_API_URL (default http://127.0.0.1:8080, the
 // tg-directory-bot web service), AI_TRON_WITH_ADS (default 1; 0 = no group ads).
-func newAITronRunner(db *gorm.DB, client *safew.Client, perms *botperm.Store) *aitron.Runner {
-	return newTronRunner(db, client, aitron.AI, "AI_TRON_ENABLED", "AI_TRON_API_URL", "AI_TRON_WITH_ADS",
-		perms.ListAITronChatIDs, perms.SetAITronEnabled)
+func newAITronRunner(db *gorm.DB, reg *registry, perms *botperm.Store) *aitron.Runner {
+	return newTronRunner(db, reg, aitron.AI, "AI_TRON_ENABLED", "AI_TRON_API_URL", "AI_TRON_WITH_ADS",
+		tronLister(reg, perms, "enable_ai_tron"), tronSetter(perms, false))
 }
 
 // newAutoTronRunner builds the 自动最优波场单双一分 runner (nil when disabled with
 // AUTO_TRON_ENABLED=0). It reads GET {base}/api/tron-draw/auto-broadcast; base and
 // ads follow AUTO_TRON_API_URL / AUTO_TRON_WITH_ADS, defaulting to the AI_TRON_* values.
-func newAutoTronRunner(db *gorm.DB, client *safew.Client, perms *botperm.Store) *aitron.Runner {
-	return newTronRunner(db, client, aitron.Auto, "AUTO_TRON_ENABLED", "AUTO_TRON_API_URL", "AUTO_TRON_WITH_ADS",
-		perms.ListAutoTronChatIDs, perms.SetAutoTronEnabled)
+func newAutoTronRunner(db *gorm.DB, reg *registry, perms *botperm.Store) *aitron.Runner {
+	return newTronRunner(db, reg, aitron.Auto, "AUTO_TRON_ENABLED", "AUTO_TRON_API_URL", "AUTO_TRON_WITH_ADS",
+		tronLister(reg, perms, "enable_auto_tron"), tronSetter(perms, true))
 }
 
-func newTronRunner(db *gorm.DB, client *safew.Client, kind aitron.Kind, enabledEnv, urlEnv, adsEnv string,
+func newTronRunner(db *gorm.DB, reg *registry, kind aitron.Kind, enabledEnv, urlEnv, adsEnv string,
 	list func() ([]string, error), set func(string, bool) error) *aitron.Runner {
 	if tronEnvOff(enabledEnv) {
 		log.Printf("%s: 已通过 %s 关闭", kind.Name, enabledEnv)
@@ -172,7 +213,7 @@ func newTronRunner(db *gorm.DB, client *safew.Client, kind aitron.Kind, enabledE
 		Kind:   kind,
 		Source: src,
 		Store:  &aitron.MySQLStore{DB: db, Table: kind.Table, List: list, Set: set},
-		Sender: aiTronSender{db: db, client: client, withAds: withAds},
+		Sender: aiTronSender{db: db, reg: reg, withAds: withAds},
 	}
 }
 

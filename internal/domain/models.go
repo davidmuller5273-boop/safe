@@ -91,7 +91,8 @@ type HotNumberPrediction struct {
 // Only developers can add/remove admins. Persisted in MySQL.
 type BotAdmin struct {
 	ID        uint      `json:"id" gorm:"primaryKey"`
-	UserID    string    `json:"user_id" gorm:"uniqueIndex;size:64;not null"`
+	BotID     string    `json:"bot_id" gorm:"column:bot_id;size:64;not null;default:''"`
+	UserID    string    `json:"user_id" gorm:"size:64;not null"`
 	Note      string    `json:"note" gorm:"size:255"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -100,8 +101,9 @@ type BotAdmin struct {
 // BotGroupAdmin grants group-scoped bot permissions for a specific chat/group.
 type BotGroupAdmin struct {
 	ID        uint      `json:"id" gorm:"primaryKey"`
-	UserID    string    `json:"user_id" gorm:"uniqueIndex:idx_bot_group_admin;size:64;not null"`
-	ChatID    string    `json:"chat_id" gorm:"uniqueIndex:idx_bot_group_admin;size:64;not null"`
+	BotID     string    `json:"bot_id" gorm:"column:bot_id;size:64;not null;default:''"`
+	UserID    string    `json:"user_id" gorm:"size:64;not null"`
+	ChatID    string    `json:"chat_id" gorm:"size:64;not null"`
 	Note      string    `json:"note" gorm:"size:255"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -111,7 +113,8 @@ type BotGroupAdmin struct {
 // A group without its own ad (both fields empty) sends the plain body: there is no global fallback.
 type BotGroupAd struct {
 	ID        uint      `json:"id" gorm:"primaryKey"`
-	ChatID    string    `json:"chat_id" gorm:"uniqueIndex;size:64;not null"`
+	BotID     string    `json:"bot_id" gorm:"column:bot_id;size:64;not null;default:''"`
+	ChatID    string    `json:"chat_id" gorm:"size:64;not null"`
 	PrefixAd  string    `json:"prefix_ad" gorm:"type:text"`
 	SuffixAd  string    `json:"suffix_ad" gorm:"type:text"`
 	CreatedAt time.Time `json:"created_at"`
@@ -122,7 +125,8 @@ type BotGroupAd struct {
 // PushEnabled defaults to false when the bot first sees a group.
 type BotGroupSettings struct {
 	ID                  uint      `json:"id" gorm:"primaryKey"`
-	ChatID              string    `json:"chat_id" gorm:"uniqueIndex;size:64;not null"`
+	BotID               string    `json:"bot_id" gorm:"column:bot_id;size:64;not null;default:''"`
+	ChatID              string    `json:"chat_id" gorm:"size:64;not null"`
 	Title               string    `json:"title" gorm:"size:255"`
 	Username            string    `json:"username" gorm:"size:128"`
 	ChatType            string    `json:"chat_type" gorm:"size:32"`
@@ -140,8 +144,9 @@ type BotGroupSettings struct {
 // BotGroupMember caches members observed in a group (messages + admin refresh).
 type BotGroupMember struct {
 	ID        uint      `json:"id" gorm:"primaryKey"`
-	ChatID    string    `json:"chat_id" gorm:"uniqueIndex:idx_bot_group_member;size:64;not null"`
-	UserID    string    `json:"user_id" gorm:"uniqueIndex:idx_bot_group_member;size:64;not null"`
+	BotID     string    `json:"bot_id" gorm:"column:bot_id;size:64;not null;default:''"`
+	ChatID    string    `json:"chat_id" gorm:"size:64;not null"`
+	UserID    string    `json:"user_id" gorm:"size:64;not null"`
 	Username  string    `json:"username" gorm:"size:128"`
 	FirstName string    `json:"first_name" gorm:"size:128"`
 	IsAdmin   bool      `json:"is_admin" gorm:"not null;default:false"`

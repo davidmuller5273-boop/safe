@@ -133,17 +133,13 @@ func (w worker) runLotterySender(ctx context.Context) error {
 }
 
 func (w worker) flushLotteryOutbox(ctx context.Context) {
+	// Unscoped store: pending rows of every bot; each row is sent by its own bot.
 	items, err := w.lb.store.PendingOutbox(lotterySendBatch)
 	if err != nil {
 		log.Printf("读取开奖播报队列失败: %v", err)
 		return
 	}
 	if len(items) == 0 {
-		return
-	}
-	botConfig, err := systemconfig.LoadSafeW(w.db)
-	if err != nil {
-		log.Printf("开奖播报等待 SafeW 配置: %v", err)
 		return
 	}
 	sw, err := w.lb.store.LoadSwitches()
@@ -158,19 +154,26 @@ func (w worker) flushLotteryOutbox(ctx context.Context) {
 			_ = w.lb.store.FinishOutbox(item.ID, false, 0, false, "播报已过期，未发送", 0)
 			continue
 		}
-		msgID, pinned, err := w.deliverBroadcast(ctx, botConfig.Token, item.ChatID, item.Body, sw.WithAds)
+		bw, token, ok := w.route(item.BotID)
+		if !ok {
+			if w.reg.get(item.BotID) == nil {
+				_ = w.lb.store.FinishOutbox(item.ID, false, 0, false, "机器人已停用或未运行，未发送", 0)
+			}
+			continue // mother token not configured yet: retry next tick
+		}
+		msgID, pinned, err := bw.deliverBroadcast(ctx, token, item.ChatID, item.Body, sw.WithAds)
 		if err != nil {
 			if safew.IsPermanentChatError(err) {
-				log.Printf("开奖播报群不可达（永久错误），标记失败并停用该群订阅 chat=%s game=%s issue=%s: %v", item.ChatID, item.GameCode, item.Issue, err)
+				log.Printf("开奖播报群不可达（永久错误），标记失败并停用该群订阅 bot=%s chat=%s game=%s issue=%s: %v", item.BotID, item.ChatID, item.GameCode, item.Issue, err)
 				_ = w.lb.store.FinishOutbox(item.ID, false, 0, false, err.Error(), 0)
-				if n, derr := w.lb.store.DisableChat(item.ChatID); derr != nil {
+				if n, derr := bw.lbs.DisableChat(item.ChatID); derr != nil {
 					log.Printf("停用开奖播报订阅失败 chat=%s: %v", item.ChatID, derr)
 				} else if n > 0 {
 					log.Printf("已停用开奖播报订阅并作废待发 %d 条 chat=%s", n, item.ChatID)
 				}
 				continue
 			}
-			log.Printf("开奖播报发送失败 chat=%s game=%s issue=%s: %v", item.ChatID, item.GameCode, item.Issue, err)
+			log.Printf("开奖播报发送失败 bot=%s chat=%s game=%s issue=%s: %v", item.BotID, item.ChatID, item.GameCode, item.Issue, err)
 			_ = w.lb.store.FinishOutbox(item.ID, false, 0, false, err.Error(), lotteryMaxAttempts)
 			continue
 		}
@@ -181,7 +184,7 @@ func (w worker) flushLotteryOutbox(ctx context.Context) {
 		if err := w.lb.store.FinishOutbox(item.ID, true, int64(msgID), pinned, note, lotteryMaxAttempts); err != nil {
 			log.Printf("更新开奖播报状态失败 id=%d: %v", item.ID, err)
 		}
-		log.Printf("开奖播报已发送 chat=%s game=%s issue=%s message_id=%d pinned=%v", item.ChatID, item.GameCode, item.Issue, msgID, pinned)
+		log.Printf("开奖播报已发送 bot=%s chat=%s game=%s issue=%s message_id=%d pinned=%v", item.BotID, item.ChatID, item.GameCode, item.Issue, msgID, pinned)
 	}
 }
 
@@ -212,7 +215,7 @@ func sendAndPin(ctx context.Context, c broadcastClient, token, chatID, text stri
 func (w worker) deliverBroadcast(ctx context.Context, token, chatID, body string, withAds bool) (int, bool, error) {
 	text := html.EscapeString(body)
 	if withAds {
-		wrapped, err := ads.Wrap(w.db, chatID, text)
+		wrapped, err := ads.Wrap(w.db, w.botID(), chatID, text)
 		if err != nil {
 			return 0, false, err
 		}
@@ -225,7 +228,7 @@ func (w worker) deliverBroadcast(ctx context.Context, token, chatID, body string
 func (w worker) sendLotteryText(ctx context.Context, token, chatID, body string, withAds bool, markup *safew.InlineKeyboardMarkup) error {
 	text := html.EscapeString(body)
 	if withAds {
-		wrapped, err := ads.Wrap(w.db, chatID, text)
+		wrapped, err := ads.Wrap(w.db, w.botID(), chatID, text)
 		if err != nil {
 			return err
 		}
@@ -245,7 +248,7 @@ func (w worker) runAsync(ctx context.Context, token, chatID string, fn func() er
 }
 
 func (w worker) lotterySwitches() lotterybroadcast.Switches {
-	sw, err := w.lb.store.LoadSwitches()
+	sw, err := w.lbs.LoadSwitches()
 	if err != nil {
 		log.Printf("读取开奖播报开关失败，使用默认: %v", err)
 		return lotterybroadcast.DefaultSwitches()
@@ -297,7 +300,7 @@ func chunkText(blocks []string, sep string, max int) []string {
 }
 
 func (w worker) lotteryCodesForChat(chatID string) []string {
-	codes, err := w.lb.store.SubscribedCodesForChat(chatID)
+	codes, err := w.lbs.SubscribedCodesForChat(chatID)
 	if err != nil || len(codes) == 0 {
 		return append([]string(nil), lotterybroadcast.GameOrder...)
 	}
@@ -324,7 +327,7 @@ func (w worker) lotteryQuery(ctx context.Context, token string, chat safew.Chat,
 		}
 		codes = lotterybroadcast.CodesForSelector(selector)
 	}
-	rows, err := w.lb.store.LatestResults(codes)
+	rows, err := w.lbs.LatestResults(codes)
 	if err != nil {
 		return err
 	}
@@ -334,7 +337,7 @@ func (w worker) lotteryQuery(ctx context.Context, token string, chat safew.Chat,
 		go w.refreshForQuery(context.WithoutCancel(ctx), codes, sw, true)
 	} else {
 		note, berr := w.ensureHistoryCache(ctx, codes)
-		rows, err = w.lb.store.LatestResults(codes)
+		rows, err = w.lbs.LatestResults(codes)
 		if err != nil {
 			return err
 		}
@@ -371,7 +374,7 @@ func (w worker) lotteryQuery(ctx context.Context, token string, chat safew.Chat,
 // subscriptions; replies with the subscribed games' latest results from cache.
 func (w worker) lotteryKeyword(ctx context.Context, token string, chat safew.Chat) error {
 	chatID := chat.IDString()
-	codes, err := w.lb.store.SubscribedCodesForChat(chatID)
+	codes, err := w.lbs.SubscribedCodesForChat(chatID)
 	if err != nil || len(codes) == 0 {
 		return err
 	}
@@ -379,7 +382,7 @@ func (w worker) lotteryKeyword(ctx context.Context, token string, chat safew.Cha
 	if !sw.QueryEnabled {
 		return nil
 	}
-	rows, err := w.lb.store.LatestResults(codes)
+	rows, err := w.lbs.LatestResults(codes)
 	if err != nil {
 		return err
 	}
@@ -387,7 +390,7 @@ func (w worker) lotteryKeyword(ctx context.Context, token string, chat safew.Cha
 		go w.refreshForQuery(context.WithoutCancel(ctx), codes, sw, true)
 	} else {
 		note, berr := w.ensureHistoryCache(ctx, codes)
-		rows, err = w.lb.store.LatestResults(codes)
+		rows, err = w.lbs.LatestResults(codes)
 		if err != nil {
 			return err
 		}
@@ -432,7 +435,7 @@ func historyKeyboard(code string, page, pageCount int) *safew.InlineKeyboardMark
 }
 
 func (w worker) storedHistory(code string) ([]lotterybroadcast.Result, error) {
-	rows, err := w.lb.store.History(code, 100)
+	rows, err := w.lbs.History(code, 100)
 	if err != nil {
 		return nil, err
 	}
@@ -584,7 +587,7 @@ func (w worker) lotterySubscribe(ctx context.Context, token string, chat safew.C
 	if !lotterybroadcast.IsSelector(selector) {
 		return w.replyPlain(ctx, token, chat.IDString(), "用法：/订阅开奖 全部、福彩、体彩、六合彩或彩种名称")
 	}
-	if err := w.lb.store.AddSubscription(chat.IDString(), selector, userID); err != nil {
+	if err := w.lbs.AddSubscription(chat.IDString(), selector, userID); err != nil {
 		return err
 	}
 	return w.replyPlain(ctx, token, chat.IDString(), fmt.Sprintf("已订阅：%s。新期开奖后将自动播报并置顶（机器人需为群管理员并有置顶权限）。", lotterybroadcast.SelectorLabel(selector)))
@@ -606,7 +609,7 @@ func (w worker) lotteryUnsubscribe(ctx context.Context, token string, chat safew
 	if selector == "all" {
 		target = ""
 	}
-	n, err := w.lb.store.RemoveSubscription(chat.IDString(), target)
+	n, err := w.lbs.RemoveSubscription(chat.IDString(), target)
 	if err != nil {
 		return err
 	}
@@ -619,7 +622,7 @@ func (w worker) lotterySubscriptions(ctx context.Context, token string, chat saf
 	if !isGroupChat(chat) {
 		return w.replyPlain(ctx, token, chatID, "该命令只能在群组中使用。")
 	}
-	rows, err := w.lb.store.Subscriptions(chatID, 100)
+	rows, err := w.lbs.Subscriptions(chatID, 100)
 	if err != nil {
 		return err
 	}

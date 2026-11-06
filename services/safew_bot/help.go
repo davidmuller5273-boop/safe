@@ -52,6 +52,9 @@ const (
 /关闭亚军6码 — 关闭亚军6码
 /关闭亚军7码 — 关闭亚军7码`
 
+	helpClone = `【克隆机器人】
+/克隆 — 私聊发送，按提示把 @BotFather 的 Token 发给我，立即得到一个属于你的机器人（管理员全部功能，群数据独立）`
+
 	helpGroupAdmins = `【群管理员】
 /addgroupadmin 用户ID [群ID] — 添加群管理员
 /removegroupadmin 用户ID [群ID] — 移除群管理员
@@ -72,5 +75,6 @@ func helpForRole(role string) string {
 		title = "📖 使用帮助（群管理员）"
 		sections = append(sections, helpLottery, helpAds)
 	}
+	sections = append(sections, helpClone)
 	return title + "\n\n" + strings.Join(sections, "\n\n") + "\n\n" + footer
 }

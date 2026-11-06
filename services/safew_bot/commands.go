@@ -2,6 +2,7 @@ package safewbot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -20,7 +21,7 @@ func (w worker) runCommands(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		botConfig, err := systemconfig.LoadSafeW(w.db)
+		botConfig, err := w.loadBotConfig()
 		if err != nil {
 			log.Printf("命令轮询等待 SafeW 配置: %v", err)
 			if !wait(ctx, 5*time.Second) {
@@ -33,7 +34,15 @@ func (w worker) runCommands(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return nil
 			}
-			log.Printf("getUpdates 失败: %v", err)
+			if w.inst != nil && !w.inst.IsMother && isUnauthorized(err) {
+				log.Printf("克隆机器人 bot_id=%s Token 已失效，自动停用", w.botID())
+				if w.clones != nil {
+					_ = w.clones.SetStatus(w.botID(), "disabled", "Token 已失效（401），请重新 /克隆")
+				}
+				w.reg.remove(w.botID())
+				return nil
+			}
+			log.Printf("getUpdates 失败 bot=%s: %v", w.botID(), err)
 			if !wait(ctx, 3*time.Second) {
 				return nil
 			}
@@ -63,6 +72,9 @@ func (w worker) runCommands(ctx context.Context) error {
 				continue
 			}
 			if !strings.HasPrefix(strings.TrimSpace(update.Message.Text), "/") {
+				if w.maybeCloneToken(ctx, botConfig.Token, update.Message) {
+					continue
+				}
 				w.handleLotteryKeyword(ctx, botConfig, update.Message.Chat, update.Message.Text)
 				continue
 			}
@@ -112,6 +124,17 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 	}
 	if enabled, ok := autoTronCommand(cmd, args); ok {
 		return w.cmdSetAutoTron(ctx, botConfig, userID, chatID, enabled)
+	}
+
+	if isCloneCommand(cmd) {
+		return w.cmdClone(ctx, botConfig.Token, msg, userID, args)
+	}
+	if cmd == "/取消" && w.reg != nil && w.reg.isPending(w.botID(), userID) {
+		w.reg.setPending(w.botID(), userID, false)
+		return w.replyPlain(ctx, botConfig.Token, chatID, "已取消克隆")
+	}
+	if handled, err := w.handleCloneAdminCommand(ctx, botConfig.Token, chatID, userID, cmd, args); handled {
+		return err
 	}
 
 	switch cmd {
@@ -187,7 +210,7 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 		if !ok {
 			return w.replyPlain(ctx, botConfig.Token, chatID, "权限不足")
 		}
-		s, err := ads.LoadForChat(w.db, chatID)
+		s, err := ads.LoadForChat(w.db, w.botID(), chatID)
 		if err != nil {
 			return err
 		}
@@ -216,7 +239,7 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 		if scope != "group" {
 			return w.replyPlain(ctx, botConfig.Token, chatID, "用法: /resetads group")
 		}
-		if err := ads.ClearGroup(w.db, chatID); err != nil {
+		if err := ads.ClearGroup(w.db, w.botID(), chatID); err != nil {
 			return err
 		}
 		return w.replyPlain(ctx, botConfig.Token, chatID, "已删除本群广告（没有广告的群只发送正文，不再回落全局广告）")
@@ -518,9 +541,9 @@ func (w worker) cmdChineseAd(ctx context.Context, botConfig systemconfig.SafeW, 
 	}
 	// Empty content clears that side for the group.
 	if isPrefix {
-		err = ads.SaveGroup(w.db, chatID, &content, nil)
+		err = ads.SaveGroup(w.db, w.botID(), chatID, &content, nil)
 	} else {
-		err = ads.SaveGroup(w.db, chatID, nil, &content)
+		err = ads.SaveGroup(w.db, w.botID(), chatID, nil, &content)
 	}
 	if err != nil {
 		return err
@@ -543,7 +566,7 @@ func (w worker) cmdChineseAdBoth(ctx context.Context, botConfig systemconfig.Saf
 	if !found {
 		return w.replyPlain(ctx, botConfig.Token, chatID, "用法: /广告前后 前广告内容 | 后广告内容\n（也可以换行，中间单独一行写 --- 分隔；某一侧留空表示清空）")
 	}
-	if err := ads.SaveGroup(w.db, chatID, &prefix, &suffix); err != nil {
+	if err := ads.SaveGroup(w.db, w.botID(), chatID, &prefix, &suffix); err != nil {
 		return err
 	}
 	show := func(v string) string {
@@ -575,9 +598,9 @@ func (w worker) cmdSetAd(ctx context.Context, botConfig systemconfig.SafeW, user
 		return w.replyPlain(ctx, botConfig.Token, chatID, globalAdDisabledMsg)
 	} else {
 		if isPrefix {
-			err = ads.SaveGroup(w.db, chatID, &content, nil)
+			err = ads.SaveGroup(w.db, w.botID(), chatID, &content, nil)
 		} else {
-			err = ads.SaveGroup(w.db, chatID, nil, &content)
+			err = ads.SaveGroup(w.db, w.botID(), chatID, nil, &content)
 		}
 	}
 	if err != nil {
@@ -607,9 +630,9 @@ func (w worker) cmdClearAd(ctx context.Context, botConfig systemconfig.SafeW, us
 		return w.replyPlain(ctx, botConfig.Token, chatID, globalAdDisabledMsg)
 	} else {
 		if isPrefix {
-			err = ads.SaveGroup(w.db, chatID, &empty, nil)
+			err = ads.SaveGroup(w.db, w.botID(), chatID, &empty, nil)
 		} else {
-			err = ads.SaveGroup(w.db, chatID, nil, &empty)
+			err = ads.SaveGroup(w.db, w.botID(), chatID, nil, &empty)
 		}
 	}
 	if err != nil {
@@ -623,7 +646,7 @@ func (w worker) cmdClearAd(ctx context.Context, botConfig systemconfig.SafeW, us
 }
 
 func (w worker) reply(ctx context.Context, token, chatID, body string) error {
-	text, err := ads.Wrap(w.db, chatID, body)
+	text, err := ads.Wrap(w.db, w.botID(), chatID, body)
 	if err != nil {
 		return err
 	}
@@ -839,4 +862,10 @@ func (w worker) cmdDevMembers(ctx context.Context, token, replyChat, args string
 	pages := int((total + int64(pageSize) - 1) / int64(pageSize))
 	fmt.Fprintf(&b, "\n翻页: /devmembers %s %d  (共%d页)", targetChat, page+1, pages)
 	return w.replyPlain(ctx, token, replyChat, strings.TrimSpace(b.String()))
+}
+
+// isUnauthorized reports a revoked / wrong token (HTTP 401).
+func isUnauthorized(err error) bool {
+	var apiErr *safew.APIError
+	return errors.As(err, &apiErr) && (apiErr.HTTPStatus == 401 || apiErr.Code == 401)
 }

@@ -109,10 +109,10 @@ func TestCodeModeUpsertSQL(t *testing.T) {
 		want    []string
 		unwant  []string
 	}{
-		{6, true, []string{"VALUES (?, 1, 1, 0,", "enable_6_code=VALUES(enable_6_code)", "enable_7_code=VALUES(enable_7_code)", "push_enabled=VALUES(push_enabled)"}, []string{"enable_runner_up_6_code=VALUES", "enable_runner_up_7_code=VALUES"}},
-		{7, true, []string{"VALUES (?, 1, 0, 1,", "enable_6_code=VALUES(enable_6_code)", "enable_7_code=VALUES(enable_7_code)"}, []string{"enable_runner_up_6_code=1"}},
-		{6, false, []string{"VALUES (?, 0, 0, 0,", "enable_6_code=0"}, []string{"enable_runner_up_6_code=0,"}},
-		{7, false, []string{"VALUES (?, 0, 0, 0,", "enable_7_code=0"}, nil},
+		{6, true, []string{"VALUES (?, ?, 1, 1, 0,", "enable_6_code=VALUES(enable_6_code)", "enable_7_code=VALUES(enable_7_code)", "push_enabled=VALUES(push_enabled)"}, []string{"enable_runner_up_6_code=VALUES", "enable_runner_up_7_code=VALUES"}},
+		{7, true, []string{"VALUES (?, ?, 1, 0, 1,", "enable_6_code=VALUES(enable_6_code)", "enable_7_code=VALUES(enable_7_code)"}, []string{"enable_runner_up_6_code=1"}},
+		{6, false, []string{"VALUES (?, ?, 0, 0, 0,", "enable_6_code=0"}, []string{"enable_runner_up_6_code=0,"}},
+		{7, false, []string{"VALUES (?, ?, 0, 0, 0,", "enable_7_code=0"}, nil},
 	}
 	for _, tc := range cases {
 		sql, err := codeModeUpsertSQL(tc.size, tc.enabled)

@@ -11,7 +11,9 @@ import (
 
 	"github.com/davidmuller5273-boop/safe/internal/ads"
 	"github.com/davidmuller5273-boop/safe/internal/aitron"
+	"github.com/davidmuller5273-boop/safe/internal/botclone"
 	"github.com/davidmuller5273-boop/safe/internal/botperm"
+	"github.com/davidmuller5273-boop/safe/internal/botscope"
 	"github.com/davidmuller5273-boop/safe/internal/config"
 	"github.com/davidmuller5273-boop/safe/internal/domain"
 	"github.com/davidmuller5273-boop/safe/internal/lottery/hotnumber"
@@ -53,17 +55,44 @@ func Run() error {
 		return err
 	}
 	swClient := safew.NewClient(cfg.SafeWAPIBaseURL)
-	perms := botperm.NewStore(db, cfg.DeveloperUserIDs)
-	worker := worker{
-		db:       db,
-		queue:    drawQueue,
-		client:   swClient,
-		perms:    perms,
-		lb:       newLotteryRuntime(lotterybroadcast.NewStore(db), lotterybroadcast.NewService(lotterybroadcast.SourcesFromEnv())),
-		aiTron:   newAITronRunner(db, swClient, perms),
-		autoTron: newAutoTronRunner(db, swClient, perms),
+	basePerms := botperm.NewStore(db, cfg.DeveloperUserIDs)
+
+	// 母机器人 bot_id: getMe (fallback: token prefix). Legacy rows (bot_id='')
+	// are assigned to it so existing groups keep working unchanged.
+	mother, motherToken, err := resolveMother(ctx, db, swClient)
+	if err != nil {
+		return err
 	}
-	log.Printf("SafeW 机器人消息服务已启动 (developers=%d)", len(cfg.DeveloperUserIDs))
+	extra := []botscope.Table{aitron.ScopeTable(aitron.AI), aitron.ScopeTable(aitron.Auto)}
+	for _, k := range []aitron.Kind{aitron.AI, aitron.Auto} {
+		_ = aitron.EnsureSchema(db, k)
+	}
+	if err := botscope.BackfillMother(db, mother.ID, extra...); err != nil {
+		log.Printf("历史数据归属母机器人失败: %v", err)
+	}
+	_ = systemconfig.SaveValue(db, "mother_bot_id", mother.ID)
+
+	reg := newRegistry(ctx, mother)
+	var cloneStore *botclone.Store
+	if c, err := botclone.NewCipher(cloneSecret(motherToken)); err == nil {
+		cloneStore = &botclone.Store{DB: db, Cipher: c}
+	} else {
+		log.Printf("克隆功能不可用: %v", err)
+	}
+	base := worker{
+		db:        db,
+		queue:     drawQueue,
+		client:    swClient,
+		basePerms: basePerms,
+		reg:       reg,
+		clones:    cloneStore,
+		lb:        newLotteryRuntime(lotterybroadcast.NewStore(db), lotterybroadcast.NewService(lotterybroadcast.SourcesFromEnv())),
+	}
+	base.aiTron = newAITronRunner(db, reg, basePerms)
+	base.autoTron = newAutoTronRunner(db, reg, basePerms)
+	worker := base.forInstance(mother)
+	log.Printf("SafeW 机器人消息服务已启动 (developers=%d, 母机器人 bot_id=%s)", len(cfg.DeveloperUserIDs), mother.ID)
+	worker.startActiveClones()
 
 	const workers = 7
 	errCh := make(chan error, workers)
@@ -86,13 +115,19 @@ func Run() error {
 }
 
 type worker struct {
-	db       *gorm.DB
-	queue    *queue.LotteryDrawQueueClient
-	client   *safew.Client
-	perms    *botperm.Store
-	lb       *lotteryRuntime // 开奖播报 (nil disables it)
-	aiTron   *aitron.Runner  // AI波场单双一分 broadcast (nil disables it)
-	autoTron *aitron.Runner  // 自动最优波场单双一分 broadcast (nil disables it)
+	db     *gorm.DB
+	queue  *queue.LotteryDrawQueueClient
+	client *safew.Client
+	perms  *botperm.Store // scoped to inst
+
+	basePerms *botperm.Store          // unscoped (developers + DB); use ForBot
+	inst      *botInstance            // bot this worker serves
+	reg       *registry               // all running bots (mother + clones)
+	clones    *botclone.Store         // nil when clone feature is unavailable
+	lbs       *lotterybroadcast.Store // 开奖订阅 scoped to inst
+	lb        *lotteryRuntime         // 开奖播报 (nil disables it)
+	aiTron    *aitron.Runner          // AI波场单双一分 broadcast (nil disables it)
+	autoTron  *aitron.Runner          // 自动最优波场单双一分 broadcast (nil disables it)
 }
 
 func (w worker) runQueue(ctx context.Context) error {
@@ -150,7 +185,7 @@ func (w worker) runQueue(ctx context.Context) error {
 }
 
 func (w worker) sendToChats(ctx context.Context, botConfig systemconfig.SafeW, message queue.LotteryDrawMessage, texts predictionTexts) error {
-	targets, err := w.perms.ListPushTargets()
+	targets, err := w.basePerms.ListPushTargetsAllBots()
 	if err != nil {
 		return err
 	}
@@ -159,8 +194,14 @@ func (w worker) sendToChats(ctx context.Context, botConfig systemconfig.SafeW, m
 		return nil
 	}
 groups:
-	for _, group := range targets {
+	for _, scoped := range targets {
+		group := scoped.BotGroupSettings
 		chatID := group.ChatID
+		bw, token, ok := w.route(scoped.BotID)
+		if !ok {
+			continue // clone stopped / mother token missing
+		}
+		sentChat := w.sentChatKey(scoped.BotID, chatID)
 		jobs := groupPushJobs(group)
 		if len(jobs) == 0 {
 			log.Printf("群已开推送但未开启冠军/亚军6/7码，跳过: chat=%s issue=%s", chatID, message.IssueNumber)
@@ -174,24 +215,24 @@ groups:
 				continue
 			}
 			kind := sendKind(job.position, job.size)
-			sent, err := w.queue.WasSent(ctx, message.RecordID, chatID, kind)
+			sent, err := w.queue.WasSent(ctx, message.RecordID, sentChat, kind)
 			if err != nil {
 				return err
 			}
 			if sent {
 				continue
 			}
-			outbound, err := ads.Wrap(w.db, chatID, body)
+			outbound, err := ads.Wrap(w.db, scoped.BotID, chatID, body)
 			if err != nil {
 				return err
 			}
-			if err := w.sendWithRetry(ctx, botConfig.Token, chatID, outbound); err != nil {
+			if err := bw.sendWithRetry(ctx, token, chatID, outbound); err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
 				if safew.IsPermanentChatError(err) {
 					log.Printf("群不可达（永久错误），跳过并关闭该群推送: chat=%s issue=%s error=%v", chatID, message.IssueNumber, err)
-					if derr := w.perms.SetPushEnabled(chatID, false); derr != nil {
+					if derr := bw.perms.SetPushEnabled(chatID, false); derr != nil {
 						log.Printf("关闭群推送失败: chat=%s error=%v", chatID, derr)
 					}
 				} else {
@@ -199,7 +240,7 @@ groups:
 				}
 				continue groups
 			}
-			if err := w.queue.MarkSent(ctx, message.RecordID, chatID, kind); err != nil {
+			if err := w.queue.MarkSent(ctx, message.RecordID, sentChat, kind); err != nil {
 				return err
 			}
 		}

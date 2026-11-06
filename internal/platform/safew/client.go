@@ -420,3 +420,21 @@ func FormatChatID(v any) string {
 		return strings.TrimSpace(fmt.Sprint(v))
 	}
 }
+
+// DeleteWebhook removes a webhook so getUpdates long polling works (Telegram
+// rejects getUpdates while a webhook is set). Pending updates are kept.
+func (c *Client) DeleteWebhook(ctx context.Context, token string) error {
+	return c.do(ctx, token, "deleteWebhook", []byte(`{"drop_pending_updates":false}`), nil)
+}
+
+// DeleteMessage deletes one message (used to remove a pasted Bot Token).
+func (c *Client) DeleteMessage(ctx context.Context, token, chatID string, messageID int) error {
+	body, err := json.Marshal(map[string]any{"chat_id": ChatIDValue(chatID), "message_id": messageID})
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, token, "deleteMessage", body, nil)
+}
+
+// BaseURL returns the API base this client talks to.
+func (c *Client) BaseURL() string { return c.baseURL }

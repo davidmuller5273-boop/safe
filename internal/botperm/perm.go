@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/davidmuller5273-boop/safe/internal/botscope"
 	"github.com/davidmuller5273-boop/safe/internal/domain"
 	"gorm.io/gorm"
 )
@@ -33,6 +34,8 @@ func RoleLabel(role string) string {
 type Store struct {
 	DB               *gorm.DB
 	DeveloperUserIDs map[string]struct{}
+	// BotID scopes every per-group row to one bot instance (母机器人 or 克隆).
+	BotID string
 }
 
 func NewStore(db *gorm.DB, developerIDs []string) *Store {
@@ -57,7 +60,7 @@ func (s *Store) IsAdmin(userID string) (bool, error) {
 		return true, nil
 	}
 	var count int64
-	err := s.DB.Model(&domain.BotAdmin{}).Where("user_id = ?", userID).Count(&count).Error
+	err := s.DB.Model(&domain.BotAdmin{}).Where("bot_id = ? AND user_id = ?", s.BotID, userID).Count(&count).Error
 	return count > 0, err
 }
 
@@ -72,7 +75,7 @@ func (s *Store) IsGroupAdmin(userID, chatID string) (bool, error) {
 		return ok, err
 	}
 	var count int64
-	err = s.DB.Model(&domain.BotGroupAdmin{}).Where("user_id = ? AND chat_id = ?", userID, chatID).Count(&count).Error
+	err = s.DB.Model(&domain.BotGroupAdmin{}).Where("bot_id = ? AND user_id = ? AND chat_id = ?", s.BotID, userID, chatID).Count(&count).Error
 	return count > 0, err
 }
 
@@ -83,13 +86,13 @@ func (s *Store) RoleInChat(userID, chatID string) (string, error) {
 		return RoleDeveloper, nil
 	}
 	var count int64
-	if err := s.DB.Model(&domain.BotAdmin{}).Where("user_id = ?", userID).Count(&count).Error; err != nil {
+	if err := s.DB.Model(&domain.BotAdmin{}).Where("bot_id = ? AND user_id = ?", s.BotID, userID).Count(&count).Error; err != nil {
 		return RoleNone, err
 	}
 	if count > 0 {
 		return RoleAdmin, nil
 	}
-	if err := s.DB.Model(&domain.BotGroupAdmin{}).Where("user_id = ? AND chat_id = ?", userID, chatID).Count(&count).Error; err != nil {
+	if err := s.DB.Model(&domain.BotGroupAdmin{}).Where("bot_id = ? AND user_id = ? AND chat_id = ?", s.BotID, userID, chatID).Count(&count).Error; err != nil {
 		return RoleNone, err
 	}
 	if count > 0 {
@@ -118,7 +121,7 @@ func (s *Store) CanControlSensitive(actorID, chatID string) (bool, error) {
 		return ok, err
 	}
 	var count int64
-	err = s.DB.Model(&domain.BotGroupAdmin{}).Where("user_id = ? AND chat_id = ?", actorID, chatID).Count(&count).Error
+	err = s.DB.Model(&domain.BotGroupAdmin{}).Where("bot_id = ? AND user_id = ? AND chat_id = ?", s.BotID, actorID, chatID).Count(&count).Error
 	return count > 0, err
 }
 
@@ -135,12 +138,12 @@ func (s *Store) AddAdmin(userID, note string) error {
 	if s.IsDeveloper(userID) {
 		return errors.New("该用户已是开发者，无需再设为超级管理员")
 	}
-	row := domain.BotAdmin{UserID: userID, Note: note}
-	return s.DB.Where("user_id = ?", userID).Assign(domain.BotAdmin{Note: note}).FirstOrCreate(&row).Error
+	row := domain.BotAdmin{BotID: s.BotID, UserID: userID, Note: note}
+	return s.DB.Where("bot_id = ? AND user_id = ?", s.BotID, userID).Assign(domain.BotAdmin{Note: note}).FirstOrCreate(&row).Error
 }
 
 func (s *Store) RemoveAdmin(userID string) error {
-	return s.DB.Where("user_id = ?", strings.TrimSpace(userID)).Delete(&domain.BotAdmin{}).Error
+	return s.DB.Where("bot_id = ? AND user_id = ?", s.BotID, strings.TrimSpace(userID)).Delete(&domain.BotAdmin{}).Error
 }
 
 func (s *Store) AddGroupAdmin(userID, chatID, note string) error {
@@ -149,25 +152,25 @@ func (s *Store) AddGroupAdmin(userID, chatID, note string) error {
 	if userID == "" || chatID == "" {
 		return errors.New("user_id 与 chat_id 均不能为空")
 	}
-	row := domain.BotGroupAdmin{UserID: userID, ChatID: chatID, Note: note}
-	return s.DB.Where("user_id = ? AND chat_id = ?", userID, chatID).
+	row := domain.BotGroupAdmin{BotID: s.BotID, UserID: userID, ChatID: chatID, Note: note}
+	return s.DB.Where("bot_id = ? AND user_id = ? AND chat_id = ?", s.BotID, userID, chatID).
 		Assign(domain.BotGroupAdmin{Note: note}).FirstOrCreate(&row).Error
 }
 
 func (s *Store) RemoveGroupAdmin(userID, chatID string) error {
-	return s.DB.Where("user_id = ? AND chat_id = ?", strings.TrimSpace(userID), strings.TrimSpace(chatID)).
+	return s.DB.Where("bot_id = ? AND user_id = ? AND chat_id = ?", s.BotID, strings.TrimSpace(userID), strings.TrimSpace(chatID)).
 		Delete(&domain.BotGroupAdmin{}).Error
 }
 
 func (s *Store) ListAdmins() ([]domain.BotAdmin, error) {
 	var list []domain.BotAdmin
-	err := s.DB.Order("id").Find(&list).Error
+	err := s.DB.Where("bot_id = ?", s.BotID).Order("id").Find(&list).Error
 	return list, err
 }
 
 func (s *Store) ListGroupAdmins(chatID string) ([]domain.BotGroupAdmin, error) {
 	var list []domain.BotGroupAdmin
-	q := s.DB.Order("id")
+	q := s.DB.Where("bot_id = ?", s.BotID).Order("id")
 	if strings.TrimSpace(chatID) != "" {
 		q = q.Where("chat_id = ?", strings.TrimSpace(chatID))
 	}
@@ -182,7 +185,7 @@ func (s *Store) ListGroupAdminsForUser(userID string) ([]domain.BotGroupAdmin, e
 	if userID == "" {
 		return list, nil
 	}
-	err := s.DB.Where("user_id = ?", userID).Order("id").Find(&list).Error
+	err := s.DB.Where("bot_id = ? AND user_id = ?", s.BotID, userID).Order("id").Find(&list).Error
 	return list, err
 }
 
@@ -195,11 +198,11 @@ func (s *Store) EnsureGroup(chatID string) error {
 		return nil
 	}
 	return s.DB.Exec(`
-INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+INSERT INTO bot_group_settings (bot_id, chat_id, push_enabled, enable_6_code, enable_7_code,
   enable_runner_up_6_code, enable_runner_up_7_code, created_at, updated_at)
-VALUES (?, 0, 0, 0, 0, 0, NOW(3), NOW(3))
+VALUES (?, ?, 0, 0, 0, 0, 0, NOW(3), NOW(3))
 ON DUPLICATE KEY UPDATE chat_id = chat_id
-`, chatID).Error
+`, s.BotID, chatID).Error
 }
 
 func (s *Store) SetPushEnabled(chatID string, enabled bool) error {
@@ -210,7 +213,7 @@ func (s *Store) SetPushEnabled(chatID string, enabled bool) error {
 	if err := s.EnsureGroup(chatID); err != nil {
 		return err
 	}
-	return s.DB.Model(&domain.BotGroupSettings{}).Where("chat_id = ?", chatID).Update("push_enabled", enabled).Error
+	return s.DB.Model(&domain.BotGroupSettings{}).Where("bot_id = ? AND chat_id = ?", s.BotID, chatID).Update("push_enabled", enabled).Error
 }
 
 func (s *Store) IsPushEnabled(chatID string) (bool, error) {
@@ -253,7 +256,7 @@ func (s *Store) ListPushTargets() ([]domain.BotGroupSettings, error) {
 SELECT id, chat_id, title, username, chat_type,
        push_enabled, enable_6_code, enable_7_code,
        enable_runner_up_6_code, enable_runner_up_7_code
-FROM bot_group_settings WHERE push_enabled = 1 ORDER BY id`).Scan(&raws).Error
+FROM bot_group_settings WHERE bot_id = ? AND push_enabled = 1 ORDER BY id`, s.BotID).Scan(&raws).Error
 	if err != nil {
 		return nil, err
 	}
@@ -293,7 +296,7 @@ func (s *Store) SetCodeMode(chatID string, size int, enabled bool) error {
 	if err != nil {
 		return err
 	}
-	if err := s.DB.Exec(sqlStr, chatID).Error; err != nil {
+	if err := s.DB.Exec(sqlStr, s.BotID, chatID).Error; err != nil {
 		return err
 	}
 	flags, err := s.scanAllCodeFlags(chatID)
@@ -322,7 +325,7 @@ func (s *Store) SetRunnerUpCodeMode(chatID string, size int, enabled bool) error
 	if err != nil {
 		return err
 	}
-	if err := s.DB.Exec(sqlStr, chatID).Error; err != nil {
+	if err := s.DB.Exec(sqlStr, s.BotID, chatID).Error; err != nil {
 		return err
 	}
 	flags, err := s.scanAllCodeFlags(chatID)
@@ -342,9 +345,9 @@ func codeModeUpsertSQL(size int, enabled bool) (string, error) {
 	switch {
 	case size == 6 && enabled:
 		return `
-INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+INSERT INTO bot_group_settings (bot_id, chat_id, push_enabled, enable_6_code, enable_7_code,
   enable_runner_up_6_code, enable_runner_up_7_code, created_at, updated_at)
-VALUES (?, 1, 1, 0, 0, 0, NOW(3), NOW(3))
+VALUES (?, ?, 1, 1, 0, 0, 0, NOW(3), NOW(3))
 ON DUPLICATE KEY UPDATE
   push_enabled=VALUES(push_enabled),
   enable_6_code=VALUES(enable_6_code),
@@ -352,9 +355,9 @@ ON DUPLICATE KEY UPDATE
   updated_at=VALUES(updated_at)`, nil
 	case size == 7 && enabled:
 		return `
-INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+INSERT INTO bot_group_settings (bot_id, chat_id, push_enabled, enable_6_code, enable_7_code,
   enable_runner_up_6_code, enable_runner_up_7_code, created_at, updated_at)
-VALUES (?, 1, 0, 1, 0, 0, NOW(3), NOW(3))
+VALUES (?, ?, 1, 0, 1, 0, 0, NOW(3), NOW(3))
 ON DUPLICATE KEY UPDATE
   push_enabled=VALUES(push_enabled),
   enable_6_code=VALUES(enable_6_code),
@@ -363,17 +366,17 @@ ON DUPLICATE KEY UPDATE
 	case size == 6 && !enabled:
 		// Disable only flips that flag; still upsert if the row is missing.
 		return `
-INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+INSERT INTO bot_group_settings (bot_id, chat_id, push_enabled, enable_6_code, enable_7_code,
   enable_runner_up_6_code, enable_runner_up_7_code, created_at, updated_at)
-VALUES (?, 0, 0, 0, 0, 0, NOW(3), NOW(3))
+VALUES (?, ?, 0, 0, 0, 0, 0, NOW(3), NOW(3))
 ON DUPLICATE KEY UPDATE
   enable_6_code=0,
   updated_at=VALUES(updated_at)`, nil
 	case size == 7 && !enabled:
 		return `
-INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+INSERT INTO bot_group_settings (bot_id, chat_id, push_enabled, enable_6_code, enable_7_code,
   enable_runner_up_6_code, enable_runner_up_7_code, created_at, updated_at)
-VALUES (?, 0, 0, 0, 0, 0, NOW(3), NOW(3))
+VALUES (?, ?, 0, 0, 0, 0, 0, NOW(3), NOW(3))
 ON DUPLICATE KEY UPDATE
   enable_7_code=0,
   updated_at=VALUES(updated_at)`, nil
@@ -388,9 +391,9 @@ func runnerUpCodeModeUpsertSQL(size int, enabled bool) (string, error) {
 	switch {
 	case size == 6 && enabled:
 		return `
-INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+INSERT INTO bot_group_settings (bot_id, chat_id, push_enabled, enable_6_code, enable_7_code,
   enable_runner_up_6_code, enable_runner_up_7_code, created_at, updated_at)
-VALUES (?, 1, 0, 0, 1, 0, NOW(3), NOW(3))
+VALUES (?, ?, 1, 0, 0, 1, 0, NOW(3), NOW(3))
 ON DUPLICATE KEY UPDATE
   push_enabled=1,
   enable_runner_up_6_code=1,
@@ -398,9 +401,9 @@ ON DUPLICATE KEY UPDATE
   updated_at=VALUES(updated_at)`, nil
 	case size == 7 && enabled:
 		return `
-INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+INSERT INTO bot_group_settings (bot_id, chat_id, push_enabled, enable_6_code, enable_7_code,
   enable_runner_up_6_code, enable_runner_up_7_code, created_at, updated_at)
-VALUES (?, 1, 0, 0, 0, 1, NOW(3), NOW(3))
+VALUES (?, ?, 1, 0, 0, 0, 1, NOW(3), NOW(3))
 ON DUPLICATE KEY UPDATE
   push_enabled=1,
   enable_runner_up_6_code=0,
@@ -408,17 +411,17 @@ ON DUPLICATE KEY UPDATE
   updated_at=VALUES(updated_at)`, nil
 	case size == 6 && !enabled:
 		return `
-INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+INSERT INTO bot_group_settings (bot_id, chat_id, push_enabled, enable_6_code, enable_7_code,
   enable_runner_up_6_code, enable_runner_up_7_code, created_at, updated_at)
-VALUES (?, 0, 0, 0, 0, 0, NOW(3), NOW(3))
+VALUES (?, ?, 0, 0, 0, 0, 0, NOW(3), NOW(3))
 ON DUPLICATE KEY UPDATE
   enable_runner_up_6_code=0,
   updated_at=VALUES(updated_at)`, nil
 	case size == 7 && !enabled:
 		return `
-INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+INSERT INTO bot_group_settings (bot_id, chat_id, push_enabled, enable_6_code, enable_7_code,
   enable_runner_up_6_code, enable_runner_up_7_code, created_at, updated_at)
-VALUES (?, 0, 0, 0, 0, 0, NOW(3), NOW(3))
+VALUES (?, ?, 0, 0, 0, 0, 0, NOW(3), NOW(3))
 ON DUPLICATE KEY UPDATE
   enable_runner_up_7_code=0,
   updated_at=VALUES(updated_at)`, nil
@@ -465,8 +468,8 @@ func (s *Store) scanAllCodeFlags(chatID string) (codeFlags, error) {
 	var f codeFlags
 	err := s.DB.Raw(
 		`SELECT enable_6_code, enable_7_code, enable_runner_up_6_code, enable_runner_up_7_code, push_enabled
-FROM bot_group_settings WHERE chat_id=?`,
-		chatID,
+FROM bot_group_settings WHERE bot_id=? AND chat_id=?`,
+		s.BotID, chatID,
 	).Row().Scan(&f.e6, &f.e7, &f.r6, &f.r7, &f.push)
 	if err != nil {
 		return codeFlags{}, err
@@ -532,7 +535,7 @@ SELECT id, chat_id, title, username, chat_type,
        push_enabled, enable_6_code, enable_7_code,
        enable_runner_up_6_code, enable_runner_up_7_code, enable_ai_tron, enable_auto_tron,
        created_at, updated_at
-FROM bot_group_settings WHERE chat_id=?`, chatID).Row().Scan(
+FROM bot_group_settings WHERE bot_id=? AND chat_id=?`, s.BotID, chatID).Row().Scan(
 		&row.ID, &row.ChatID, &title, &user, &ctype,
 		&push, &e6, &e7, &r6, &r7, &aiTron, &autoTron, &created, &updated,
 	)
@@ -598,7 +601,7 @@ func (s *Store) UpsertGroupMeta(chatID, title, username, chatType string) error 
 	if len(updates) == 0 {
 		return nil
 	}
-	return s.DB.Model(&domain.BotGroupSettings{}).Where("chat_id = ?", chatID).Updates(updates).Error
+	return s.DB.Model(&domain.BotGroupSettings{}).Where("bot_id = ? AND chat_id = ?", s.BotID, chatID).Updates(updates).Error
 }
 
 func (s *Store) ListGroups(offset, limit int) ([]domain.BotGroupSettings, int64, error) {
@@ -609,11 +612,11 @@ func (s *Store) ListGroups(offset, limit int) ([]domain.BotGroupSettings, int64,
 		offset = 0
 	}
 	var total int64
-	if err := s.DB.Model(&domain.BotGroupSettings{}).Count(&total).Error; err != nil {
+	if err := s.DB.Model(&domain.BotGroupSettings{}).Where("bot_id = ?", s.BotID).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 	var rows []domain.BotGroupSettings
-	err := s.DB.Order("id").Offset(offset).Limit(limit).Find(&rows).Error
+	err := s.DB.Where("bot_id = ?", s.BotID).Order("id").Offset(offset).Limit(limit).Find(&rows).Error
 	return rows, total, err
 }
 
@@ -623,14 +626,14 @@ func (s *Store) UpsertMember(chatID, userID, username, firstName string, isAdmin
 	if chatID == "" || userID == "" {
 		return nil
 	}
-	row := domain.BotGroupMember{ChatID: chatID, UserID: userID}
+	row := domain.BotGroupMember{BotID: s.BotID, ChatID: chatID, UserID: userID}
 	assigns := domain.BotGroupMember{
 		Username:  username,
 		FirstName: firstName,
 		IsAdmin:   isAdmin,
 		IsCreator: isCreator,
 	}
-	return s.DB.Where("chat_id = ? AND user_id = ?", chatID, userID).Assign(assigns).FirstOrCreate(&row).Error
+	return s.DB.Where("bot_id = ? AND chat_id = ? AND user_id = ?", s.BotID, chatID, userID).Assign(assigns).FirstOrCreate(&row).Error
 }
 
 type MemberInfo struct {
@@ -639,7 +642,7 @@ type MemberInfo struct {
 
 func (s *Store) RefreshAdmins(chatID string, members []MemberInfo) error {
 	chatID = strings.TrimSpace(chatID)
-	if err := s.DB.Model(&domain.BotGroupMember{}).Where("chat_id = ?", chatID).
+	if err := s.DB.Model(&domain.BotGroupMember{}).Where("bot_id = ? AND chat_id = ?", s.BotID, chatID).
 		Updates(map[string]any{"is_admin": false, "is_creator": false}).Error; err != nil {
 		return err
 	}
@@ -662,11 +665,11 @@ func (s *Store) ListMembers(chatID string, offset, limit int) ([]domain.BotGroup
 	}
 	chatID = strings.TrimSpace(chatID)
 	var total int64
-	if err := s.DB.Model(&domain.BotGroupMember{}).Where("chat_id = ?", chatID).Count(&total).Error; err != nil {
+	if err := s.DB.Model(&domain.BotGroupMember{}).Where("bot_id = ? AND chat_id = ?", s.BotID, chatID).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 	var rows []domain.BotGroupMember
-	err := s.DB.Where("chat_id = ?", chatID).Order("is_creator DESC, is_admin DESC, id").Offset(offset).Limit(limit).Find(&rows).Error
+	err := s.DB.Where("bot_id = ? AND chat_id = ?", s.BotID, chatID).Order("is_creator DESC, is_admin DESC, id").Offset(offset).Limit(limit).Find(&rows).Error
 	return rows, total, err
 }
 
@@ -676,7 +679,7 @@ func (s *Store) DeleteMember(chatID, userID string) error {
 	if chatID == "" || userID == "" {
 		return nil
 	}
-	return s.DB.Where("chat_id = ? AND user_id = ?", chatID, userID).Delete(&domain.BotGroupMember{}).Error
+	return s.DB.Where("bot_id = ? AND chat_id = ? AND user_id = ?", s.BotID, chatID, userID).Delete(&domain.BotGroupMember{}).Error
 }
 
 // SetAITronEnabled turns the per-group 「AI波场单双一分」 broadcast on/off
@@ -719,15 +722,15 @@ func (s *Store) setBroadcastFlag(col, chatID string, enabled bool) error {
 		v = 1
 	}
 	if err := s.DB.Exec(`
-INSERT INTO bot_group_settings (chat_id, push_enabled, enable_6_code, enable_7_code,
+INSERT INTO bot_group_settings (bot_id, chat_id, push_enabled, enable_6_code, enable_7_code,
   enable_runner_up_6_code, enable_runner_up_7_code, `+col+`, created_at, updated_at)
-VALUES (?, 0, 0, 0, 0, 0, ?, NOW(3), NOW(3))
+VALUES (?, ?, 0, 0, 0, 0, 0, ?, NOW(3), NOW(3))
 ON DUPLICATE KEY UPDATE `+col+`=VALUES(`+col+`), updated_at=NOW(3)
-`, chatID, v).Error; err != nil {
+`, s.BotID, chatID, v).Error; err != nil {
 		return err
 	}
 	var got int
-	if err := s.DB.Raw(`SELECT `+col+` FROM bot_group_settings WHERE chat_id=?`, chatID).Row().Scan(&got); err != nil {
+	if err := s.DB.Raw(`SELECT `+col+` FROM bot_group_settings WHERE bot_id=? AND chat_id=?`, s.BotID, chatID).Row().Scan(&got); err != nil {
 		return err
 	}
 	if (got != 0) != enabled {
@@ -741,6 +744,64 @@ func (s *Store) listBroadcastFlag(col string) ([]string, error) {
 		return nil, fmt.Errorf("未知开关列 %q", col)
 	}
 	var ids []string
-	err := s.DB.Raw(`SELECT chat_id FROM bot_group_settings WHERE ` + col + ` = 1 ORDER BY id`).Scan(&ids).Error
+	err := s.DB.Raw(`SELECT chat_id FROM bot_group_settings WHERE bot_id = ? AND `+col+` = 1 ORDER BY id`, s.BotID).Scan(&ids).Error
 	return ids, err
+}
+
+// ForBot returns a Store scoped to botID sharing the same DB. Only the mother
+// keeps the configured developers: on a cloned bot IsDeveloper is always false,
+// so developer-only commands (/devgroups, /导出所有群成员, 克隆管理…) stay on the mother.
+func (s *Store) ForBot(botID string, isMother bool) *Store {
+	devs := map[string]struct{}{}
+	if isMother {
+		devs = s.DeveloperUserIDs
+	}
+	return &Store{DB: s.DB, DeveloperUserIDs: devs, BotID: strings.TrimSpace(botID)}
+}
+
+// ScopedGroup is a push target with its owning bot.
+type ScopedGroup struct {
+	BotID string
+	domain.BotGroupSettings
+}
+
+// ListPushTargetsAllBots returns push-enabled groups of every bot instance
+// (the prediction fan-out routes each row to its own bot).
+func (s *Store) ListPushTargetsAllBots() ([]ScopedGroup, error) {
+	var botIDs []string
+	if err := s.DB.Raw("SELECT DISTINCT bot_id FROM bot_group_settings WHERE push_enabled = 1").Scan(&botIDs).Error; err != nil {
+		return nil, err
+	}
+	var out []ScopedGroup
+	for _, id := range botIDs {
+		rows, err := s.ForBot(id, false).ListPushTargets()
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range rows {
+			out = append(out, ScopedGroup{BotID: id, BotGroupSettings: r})
+		}
+	}
+	return out, nil
+}
+
+// ListBroadcastFlagKeysAllBots returns botscope keys ("bot|chat") of every bot's
+// chats with the AI / 自动最优 broadcast flag on.
+func (s *Store) ListBroadcastFlagKeysAllBots(col string) ([]string, error) {
+	if !broadcastFlagColumns[col] {
+		return nil, fmt.Errorf("未知开关列 %q", col)
+	}
+	type row struct {
+		BotID  string `gorm:"column:bot_id"`
+		ChatID string `gorm:"column:chat_id"`
+	}
+	var rows []row
+	if err := s.DB.Raw(`SELECT bot_id, chat_id FROM bot_group_settings WHERE ` + col + ` = 1 ORDER BY id`).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, botscope.Key(r.BotID, r.ChatID))
+	}
+	return out, nil
 }

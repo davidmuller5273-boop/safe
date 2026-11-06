@@ -761,7 +761,7 @@ func TestOutboxDDLIsPerKind(t *testing.T) {
 	if AI.Table == Auto.Table || !strings.Contains(ai, "`ai_tron_outbox`") || !strings.Contains(auto, "`auto_tron_outbox`") {
 		t.Fatalf("tables: %s / %s", AI.Table, Auto.Table)
 	}
-	if !strings.Contains(auto, "UNIQUE KEY `uk_tron_chat_block` (`chat_id`,`block`)") {
+	if !strings.Contains(auto, "UNIQUE KEY `uk_tron_bot_chat_block` (`bot_id`,`chat_id`,`block`)") {
 		t.Fatalf("dedupe key missing: %s", auto)
 	}
 }

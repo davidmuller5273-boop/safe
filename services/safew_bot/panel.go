@@ -64,8 +64,11 @@ func actionLevel(action string) permLevel {
 		return levelAnyone
 	case action == "gs" || strings.HasPrefix(action, "gs:"):
 		return levelSuper
-	case action == "ex":
+	case action == "ex" || action == "kll" ||
+		strings.HasPrefix(action, "klo:") || strings.HasPrefix(action, "kln:") || strings.HasPrefix(action, "kld:"):
 		return levelDeveloper
+	case action == "kl":
+		return levelAnyone
 	case strings.HasPrefix(action, "lh:"):
 		return levelAnyone
 	case action == "p:1" || action == "p:0" || action == "c:0" || action == "r:0" ||
@@ -379,7 +382,7 @@ func (w worker) panelStateForChat(chatID string, asGroup bool) panelState {
 		st.Push, st.C6, st.C7, st.R6, st.R7 = s.PushEnabled, s.Enable6Code, s.Enable7Code, s.EnableRunnerUp6Code, s.EnableRunnerUp7Code
 	}
 	if w.lb != nil {
-		if codes, err := w.lb.store.SubscribedCodesForChat(chatID); err == nil {
+		if codes, err := w.lbs.SubscribedCodesForChat(chatID); err == nil {
 			st.SubscribedCnt = len(codes)
 		}
 	}
@@ -451,7 +454,15 @@ func (w worker) privateHomeMarkup(tier, userID, role string) *safew.InlineKeyboa
 	if tier == tierGroup {
 		adminGroups, _ = w.listAdminGroupsForUser(userID)
 	}
-	return privateHomeKeyboard(tier, adminGroups, showGroupPick, showExport)
+	kb := privateHomeKeyboard(tier, adminGroups, showGroupPick, showExport)
+	if w.clones != nil {
+		row := []safew.InlineKeyboardButton{btn(tier, "🤖 克隆机器人", "kl")}
+		if w.canManageClones(userID) {
+			row = append(row, btn(tier, "🗂 克隆列表", "kll"))
+		}
+		kb.InlineKeyboard = append(kb.InlineKeyboard, row)
+	}
+	return kb
 }
 
 func groupPanelText(tier, targetChatID, title string) string {
@@ -484,7 +495,7 @@ func (w worker) subscribedSet(chatID string) map[string]bool {
 	if w.lb == nil {
 		return set
 	}
-	codes, _ := w.lb.store.SubscribedCodesForChat(chatID)
+	codes, _ := w.lbs.SubscribedCodesForChat(chatID)
 	for _, c := range codes {
 		set[c] = true
 	}
@@ -637,6 +648,10 @@ func (w worker) runPanelAction(ctx context.Context, token string, msgChat safew.
 	}
 	opIsGroup := targetChat != "" || isGroupChat(msgChat)
 
+	if strings.HasPrefix(action, "kl") {
+		toast, alert, err := w.clonePanelAction(ctx, token, msgChat, messageID, userID, action)
+		return toast, alert, viewNone, err
+	}
 	if strings.HasPrefix(action, "lh:") {
 		parts := strings.Split(action, ":")
 		page, perr := 0, error(nil)
@@ -719,7 +734,7 @@ func (w worker) runPanelAction(ctx context.Context, token string, msgChat safew.
 		}
 		return "已关闭亚军推送", false, viewKeep, nil
 	case "ad":
-		s, err := ads.LoadForChat(w.db, opChatID)
+		s, err := ads.LoadForChat(w.db, w.botID(), opChatID)
 		if err != nil {
 			return "", false, viewKeep, err
 		}
@@ -738,12 +753,12 @@ func (w worker) runPanelAction(ctx context.Context, token string, msgChat safew.
 	}
 	switch {
 	case action == "lb:1":
-		if err := w.lb.store.AddSubscription(opChatID, "all", userID); err != nil {
+		if err := w.lbs.AddSubscription(opChatID, "all", userID); err != nil {
 			return "", false, viewKeep, err
 		}
 		return "✅ 已订阅全部彩种，新期开奖后自动播报并置顶", false, viewKeep, nil
 	case action == "lb:0":
-		n, err := w.lb.store.RemoveSubscription(opChatID, "")
+		n, err := w.lbs.RemoveSubscription(opChatID, "")
 		if err != nil {
 			return "", false, viewKeep, err
 		}
@@ -756,7 +771,7 @@ func (w worker) runPanelAction(ctx context.Context, token string, msgChat safew.
 		if len(set) == 0 {
 			codes = []string{"all"}
 		}
-		if err := w.lb.store.SetSubscribedCodes(opChatID, codes, userID); err != nil {
+		if err := w.lbs.SetSubscribedCodes(opChatID, codes, userID); err != nil {
 			return "", false, viewSubs, err
 		}
 		return "开奖订阅已更新", false, viewSubs, nil
@@ -772,7 +787,7 @@ func (w worker) runPanelAction(ctx context.Context, token string, msgChat safew.
 		for c := range set {
 			codes = append(codes, c)
 		}
-		if err := w.lb.store.SetSubscribedCodes(opChatID, codes, userID); err != nil {
+		if err := w.lbs.SetSubscribedCodes(opChatID, codes, userID); err != nil {
 			return "", false, viewSubs, err
 		}
 		return "开奖订阅已更新", false, viewSubs, nil
@@ -812,7 +827,7 @@ func (w worker) statusSummary(chatID string) string {
 	}
 	sub := 0
 	if w.lb != nil {
-		if codes, err := w.lb.store.SubscribedCodesForChat(chatID); err == nil {
+		if codes, err := w.lbs.SubscribedCodesForChat(chatID); err == nil {
 			sub = len(codes)
 		}
 	}
@@ -823,7 +838,7 @@ func (w worker) subscriptionSummary(chatID string) string {
 	if w.lb == nil {
 		return "开奖播报未启用"
 	}
-	codes, err := w.lb.store.SubscribedCodesForChat(chatID)
+	codes, err := w.lbs.SubscribedCodesForChat(chatID)
 	if err != nil {
 		return shortErr(err)
 	}

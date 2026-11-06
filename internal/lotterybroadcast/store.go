@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/davidmuller5273-boop/safe/internal/botscope"
 	"github.com/davidmuller5273-boop/safe/internal/domain"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -53,13 +54,14 @@ var SchemaStatements = []string{
 		") ENGINE=InnoDB",
 	"CREATE TABLE IF NOT EXISTS `" + TableSubscriptions + "` (" +
 		"`id` bigint unsigned NOT NULL AUTO_INCREMENT," +
+		"`bot_id` varchar(64) NOT NULL DEFAULT ''," +
 		"`chat_id` varchar(64) NOT NULL," +
 		"`selector` varchar(32) NOT NULL," +
 		"`created_by` varchar(64) NOT NULL DEFAULT ''," +
 		"`is_enabled` tinyint(1) NOT NULL DEFAULT 1," +
 		"`created_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)," +
 		"PRIMARY KEY (`id`)," +
-		"UNIQUE KEY `uk_lb_subs_chat_selector` (`chat_id`,`selector`)," +
+		"UNIQUE KEY `uk_lb_subs_bot_chat_selector` (`bot_id`,`chat_id`,`selector`)," +
 		"KEY `idx_lb_subs_selector` (`selector`,`is_enabled`)" +
 		") ENGINE=InnoDB",
 	"CREATE TABLE IF NOT EXISTS `" + TableSourceStatus + "` (" +
@@ -71,6 +73,7 @@ var SchemaStatements = []string{
 		") ENGINE=InnoDB",
 	"CREATE TABLE IF NOT EXISTS `" + TableOutbox + "` (" +
 		"`id` bigint unsigned NOT NULL AUTO_INCREMENT," +
+		"`bot_id` varchar(64) NOT NULL DEFAULT ''," +
 		"`chat_id` varchar(64) NOT NULL," +
 		"`game_code` varchar(32) NOT NULL," +
 		"`issue` varchar(64) NOT NULL," +
@@ -83,7 +86,7 @@ var SchemaStatements = []string{
 		"`created_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)," +
 		"`sent_at` datetime(3) NULL DEFAULT NULL," +
 		"PRIMARY KEY (`id`)," +
-		"UNIQUE KEY `uk_lb_outbox_chat_game_issue` (`chat_id`,`game_code`,`issue`)," +
+		"UNIQUE KEY `uk_lb_outbox_bot_chat_game_issue` (`bot_id`,`chat_id`,`game_code`,`issue`)," +
 		"KEY `idx_lb_outbox_status` (`status`,`id`)" +
 		") ENGINE=InnoDB",
 }
@@ -128,6 +131,7 @@ func (r ResultRow) ToResult() Result {
 // Subscription is one group subscription row.
 type Subscription struct {
 	ID         uint64    `gorm:"column:id" json:"id"`
+	BotID      string    `gorm:"column:bot_id" json:"bot_id"`
 	ChatID     string    `gorm:"column:chat_id" json:"chat_id"`
 	Selector   string    `gorm:"column:selector" json:"selector"`
 	CreatedBy  string    `gorm:"column:created_by" json:"created_by"`
@@ -147,6 +151,7 @@ type SourceStatus struct {
 // OutboxItem is one queued broadcast.
 type OutboxItem struct {
 	ID        uint64       `gorm:"column:id" json:"id"`
+	BotID     string       `gorm:"column:bot_id" json:"bot_id"`
 	ChatID    string       `gorm:"column:chat_id" json:"chat_id"`
 	GameCode  string       `gorm:"column:game_code" json:"game_code"`
 	Issue     string       `gorm:"column:issue" json:"issue"`
@@ -161,10 +166,29 @@ type OutboxItem struct {
 }
 
 // Store is the MySQL implementation of Repo plus admin/bot queries.
-type Store struct{ DB *gorm.DB }
+//
+// BotID scopes subscriptions/outbox to one bot instance. An unscoped Store
+// (BotID "") is the process-wide view used by the draw poller, the outbox
+// sender and the admin page: it spans every bot, SubscriberChatIDs returns
+// botscope keys ("bot|chat") and Enqueue accepts them.
+type Store struct {
+	DB    *gorm.DB
+	BotID string
+}
 
-// NewStore wraps a gorm DB.
+// NewStore wraps a gorm DB (unscoped).
 func NewStore(db *gorm.DB) *Store { return &Store{DB: db} }
+
+// ForBot returns a Store scoped to one bot instance.
+func (s *Store) ForBot(botID string) *Store { return &Store{DB: s.DB, BotID: botID} }
+
+// scoped prefixes cond with "bot_id = ? AND" when the store is scoped.
+func (s *Store) scoped(cond string, args ...any) (string, []any) {
+	if s.BotID == "" {
+		return cond, args
+	}
+	return "bot_id = ? AND " + cond, append([]any{s.BotID}, args...)
+}
 
 var _ Repo = (*Store)(nil)
 
@@ -290,17 +314,19 @@ func (s *Store) AddSubscription(chatID, selector, createdBy string) error {
 	if !IsSelector(selector) {
 		return fmt.Errorf("未知彩种：%s", selector)
 	}
-	return s.DB.Exec("INSERT INTO `"+TableSubscriptions+"` (chat_id, selector, created_by, is_enabled, created_at) VALUES (?, ?, ?, 1, NOW(3)) "+
-		"ON DUPLICATE KEY UPDATE created_by=VALUES(created_by), is_enabled=1", chatID, selector, createdBy).Error
+	return s.DB.Exec("INSERT INTO `"+TableSubscriptions+"` (bot_id, chat_id, selector, created_by, is_enabled, created_at) VALUES (?, ?, ?, ?, 1, NOW(3)) "+
+		"ON DUPLICATE KEY UPDATE created_by=VALUES(created_by), is_enabled=1", s.BotID, chatID, selector, createdBy).Error
 }
 
 // RemoveSubscription mirrors remove_lottery_subscription ("" selector = all of the chat).
 func (s *Store) RemoveSubscription(chatID, selector string) (int64, error) {
 	var res *gorm.DB
 	if selector == "" {
-		res = s.DB.Exec("DELETE FROM `"+TableSubscriptions+"` WHERE chat_id = ?", chatID)
+		cond, args := s.scoped("chat_id = ?", chatID)
+		res = s.DB.Exec("DELETE FROM `"+TableSubscriptions+"` WHERE "+cond, args...)
 	} else {
-		res = s.DB.Exec("DELETE FROM `"+TableSubscriptions+"` WHERE chat_id = ? AND selector = ?", chatID, selector)
+		cond, args := s.scoped("chat_id = ? AND selector = ?", chatID, selector)
+		res = s.DB.Exec("DELETE FROM `"+TableSubscriptions+"` WHERE "+cond, args...)
 	}
 	return res.RowsAffected, res.Error
 }
@@ -313,12 +339,14 @@ func (s *Store) Subscriptions(chatID string, limit int) ([]Subscription, error) 
 	var rows []Subscription
 	// Titles are looked up separately (no cross-table JOIN) so differing table
 	// collations on existing databases can never break this query.
-	q := "SELECT id, chat_id, selector, created_by, is_enabled, created_at FROM `" + TableSubscriptions + "` "
+	q := "SELECT id, bot_id, chat_id, selector, created_by, is_enabled, created_at FROM `" + TableSubscriptions + "` "
 	var err error
 	if chatID != "" {
-		err = s.DB.Raw(q+"WHERE chat_id = ? ORDER BY selector", chatID).Scan(&rows).Error
+		cond, args := s.scoped("chat_id = ?", chatID)
+		err = s.DB.Raw(q+"WHERE "+cond+" ORDER BY selector", args...).Scan(&rows).Error
 	} else {
-		err = s.DB.Raw(q+"ORDER BY created_at DESC, id DESC LIMIT ?", limit).Scan(&rows).Error
+		cond, args := s.scoped("1 = 1")
+		err = s.DB.Raw(q+"WHERE "+cond+" ORDER BY created_at DESC, id DESC LIMIT ?", append(args, limit)...).Scan(&rows).Error
 	}
 	if err != nil || len(rows) == 0 {
 		return rows, err
@@ -328,13 +356,13 @@ func (s *Store) Subscriptions(chatID string, limit int) ([]Subscription, error) 
 		ids = append(ids, r.ChatID)
 	}
 	var groups []domain.BotGroupSettings
-	if err := s.DB.Select("chat_id", "title").Where("chat_id IN ?", ids).Find(&groups).Error; err == nil {
+	if err := s.DB.Select("bot_id", "chat_id", "title").Where("chat_id IN ?", ids).Find(&groups).Error; err == nil {
 		titles := map[string]string{}
 		for _, g := range groups {
-			titles[g.ChatID] = g.Title
+			titles[g.BotID+"|"+g.ChatID] = g.Title
 		}
 		for i := range rows {
-			rows[i].GroupTitle = titles[rows[i].ChatID]
+			rows[i].GroupTitle = titles[rows[i].BotID+"|"+rows[i].ChatID]
 		}
 	}
 	return rows, nil
@@ -343,7 +371,8 @@ func (s *Store) Subscriptions(chatID string, limit int) ([]Subscription, error) 
 // SubscribedCodesForChat expands a chat's selectors into game codes (GameOrder order).
 func (s *Store) SubscribedCodesForChat(chatID string) ([]string, error) {
 	var selectors []string
-	if err := s.DB.Raw("SELECT selector FROM `"+TableSubscriptions+"` WHERE chat_id = ? AND is_enabled = 1", chatID).Scan(&selectors).Error; err != nil {
+	cond, args := s.scoped("chat_id = ? AND is_enabled = 1", chatID)
+	if err := s.DB.Raw("SELECT selector FROM `"+TableSubscriptions+"` WHERE "+cond, args...).Scan(&selectors).Error; err != nil {
 		return nil, err
 	}
 	return ExpandSelectors(selectors), nil
@@ -352,7 +381,8 @@ func (s *Store) SubscribedCodesForChat(chatID string) ([]string, error) {
 // SubscribedCodes returns every game that has at least one enabled subscriber.
 func (s *Store) SubscribedCodes() ([]string, error) {
 	var selectors []string
-	if err := s.DB.Raw("SELECT DISTINCT selector FROM `" + TableSubscriptions + "` WHERE is_enabled = 1").Scan(&selectors).Error; err != nil {
+	cond, args := s.scoped("is_enabled = 1")
+	if err := s.DB.Raw("SELECT DISTINCT selector FROM `"+TableSubscriptions+"` WHERE "+cond, args...).Scan(&selectors).Error; err != nil {
 		return nil, err
 	}
 	return ExpandSelectors(selectors), nil
@@ -385,17 +415,32 @@ func (s *Store) SubscriberChatIDs(code string) ([]string, error) {
 	if IsMarkSix(code) {
 		marksix = "marksix"
 	}
-	var ids []string
-	err := s.DB.Raw("SELECT DISTINCT chat_id FROM `"+TableSubscriptions+"` WHERE is_enabled = 1 AND selector IN ('all', ?, ?, ?)",
-		game.Source, code, marksix).Scan(&ids).Error
-	return ids, err
+	type row struct {
+		BotID  string `gorm:"column:bot_id"`
+		ChatID string `gorm:"column:chat_id"`
+	}
+	var rows []row
+	cond, args := s.scoped("is_enabled = 1 AND selector IN ('all', ?, ?, ?)", game.Source, code, marksix)
+	if err := s.DB.Raw("SELECT DISTINCT bot_id, chat_id FROM `"+TableSubscriptions+"` WHERE "+cond, args...).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if s.BotID == "" {
+			ids = append(ids, botscope.Key(r.BotID, r.ChatID))
+		} else {
+			ids = append(ids, r.ChatID)
+		}
+	}
+	return ids, nil
 }
 
 // SetSubscribedCodes replaces a chat's subscriptions with exactly these codes
 // (all 11 → single "all" row), like the Python toggle keyboard does.
 func (s *Store) SetSubscribedCodes(chatID string, codes []string, createdBy string) error {
 	return s.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Exec("DELETE FROM `"+TableSubscriptions+"` WHERE chat_id = ?", chatID).Error; err != nil {
+		cond, args := s.scoped("chat_id = ?", chatID)
+		if err := tx.Exec("DELETE FROM `"+TableSubscriptions+"` WHERE "+cond, args...).Error; err != nil {
 			return err
 		}
 		codes = ExpandSelectors(codes)
@@ -403,8 +448,8 @@ func (s *Store) SetSubscribedCodes(chatID string, codes []string, createdBy stri
 			codes = []string{"all"}
 		}
 		for _, code := range codes {
-			if err := tx.Exec("INSERT INTO `"+TableSubscriptions+"` (chat_id, selector, created_by, is_enabled, created_at) VALUES (?, ?, ?, 1, NOW(3)) "+
-				"ON DUPLICATE KEY UPDATE created_by=VALUES(created_by), is_enabled=1", chatID, code, createdBy).Error; err != nil {
+			if err := tx.Exec("INSERT INTO `"+TableSubscriptions+"` (bot_id, chat_id, selector, created_by, is_enabled, created_at) VALUES (?, ?, ?, ?, 1, NOW(3)) "+
+				"ON DUPLICATE KEY UPDATE created_by=VALUES(created_by), is_enabled=1", s.BotID, chatID, code, createdBy).Error; err != nil {
 				return err
 			}
 		}
@@ -437,9 +482,14 @@ func (s *Store) SourceStatuses() ([]SourceStatus, error) {
 // ---- outbox ----
 
 // Enqueue inserts one pending broadcast; duplicates (same chat+game+issue) are ignored.
+// On an unscoped store chatID is a botscope key ("bot|chat").
 func (s *Store) Enqueue(chatID, code, issue, body string) (bool, error) {
-	res := s.DB.Exec("INSERT INTO `"+TableOutbox+"` (chat_id, game_code, issue, body, status, created_at) VALUES (?, ?, ?, ?, 'pending', NOW(3)) "+
-		"ON DUPLICATE KEY UPDATE id = id", chatID, code, issue, trunc(body, 4000))
+	botID := s.BotID
+	if botID == "" {
+		botID, chatID = botscope.Split(chatID)
+	}
+	res := s.DB.Exec("INSERT INTO `"+TableOutbox+"` (bot_id, chat_id, game_code, issue, body, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', NOW(3)) "+
+		"ON DUPLICATE KEY UPDATE id = id", botID, chatID, code, issue, trunc(body, 4000))
 	if res.Error != nil {
 		return false, res.Error
 	}
@@ -452,7 +502,8 @@ func (s *Store) PendingOutbox(limit int) ([]OutboxItem, error) {
 		limit = 15
 	}
 	var rows []OutboxItem
-	err := s.DB.Raw("SELECT * FROM `"+TableOutbox+"` WHERE status = 'pending' ORDER BY id LIMIT ?", limit).Scan(&rows).Error
+	cond, args := s.scoped("status = 'pending'")
+	err := s.DB.Raw("SELECT * FROM `"+TableOutbox+"` WHERE "+cond+" ORDER BY id LIMIT ?", append(args, limit)...).Scan(&rows).Error
 	return rows, err
 }
 
@@ -474,10 +525,12 @@ func (s *Store) FinishOutbox(id uint64, success bool, messageID int64, pinned bo
 // DisableChat disables all subscriptions of an unreachable chat and fails its
 // remaining pending outbox rows. Returns the number of outbox rows failed.
 func (s *Store) DisableChat(chatID string) (int64, error) {
-	if err := s.DB.Exec("UPDATE `"+TableSubscriptions+"` SET is_enabled=0 WHERE chat_id = ?", chatID).Error; err != nil {
+	cond, args := s.scoped("chat_id = ?", chatID)
+	if err := s.DB.Exec("UPDATE `"+TableSubscriptions+"` SET is_enabled=0 WHERE "+cond, args...).Error; err != nil {
 		return 0, err
 	}
-	res := s.DB.Exec("UPDATE `"+TableOutbox+"` SET status='failed', last_error='群不可达，已停用订阅' WHERE chat_id = ? AND status = 'pending'", chatID)
+	cond, args = s.scoped("chat_id = ? AND status = 'pending'", chatID)
+	res := s.DB.Exec("UPDATE `"+TableOutbox+"` SET status='failed', last_error='群不可达，已停用订阅' WHERE "+cond, args...)
 	return res.RowsAffected, res.Error
 }
 
@@ -487,7 +540,7 @@ func (s *Store) RecentOutbox(limit int) ([]OutboxItem, error) {
 		limit = 50
 	}
 	var rows []OutboxItem
-	err := s.DB.Raw("SELECT id, chat_id, game_code, issue, status, attempts, last_error, message_id, pinned, created_at, sent_at FROM `"+TableOutbox+"` ORDER BY id DESC LIMIT ?", limit).Scan(&rows).Error
+	err := s.DB.Raw("SELECT id, bot_id, chat_id, game_code, issue, status, attempts, last_error, message_id, pinned, created_at, sent_at FROM `"+TableOutbox+"` ORDER BY id DESC LIMIT ?", limit).Scan(&rows).Error
 	return rows, err
 }
 

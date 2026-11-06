@@ -97,3 +97,9 @@ func parseChatIDs(value string) []string {
 	// Compatible with the original configuration, which stored one plain ID.
 	return NormalizeChatIDs([]string{value})
 }
+
+// SaveValue upserts one system_configs key.
+func SaveValue(db *gorm.DB, key, value string) error {
+	config := domain.SystemConfig{Key: key}
+	return db.Where("`key` = ?", key).Assign(domain.SystemConfig{Value: value}).FirstOrCreate(&config).Error
+}
