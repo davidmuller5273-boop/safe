@@ -72,6 +72,9 @@ func (w worker) runCommands(ctx context.Context) error {
 				continue
 			}
 			if !strings.HasPrefix(strings.TrimSpace(update.Message.Text), "/") {
+				if w.maybeTGMotherToken(ctx, botConfig.Token, update.Message) {
+					continue
+				}
 				if w.maybeCloneToken(ctx, botConfig.Token, update.Message) {
 					continue
 				}
@@ -126,6 +129,9 @@ func (w worker) handleCommand(ctx context.Context, botConfig systemconfig.SafeW,
 		return w.cmdSetAutoTron(ctx, botConfig, userID, chatID, enabled)
 	}
 
+	if handled, err := w.handleTGMotherCommand(ctx, botConfig.Token, msg, userID, cmd, args); handled {
+		return err
+	}
 	if isCloneCommand(cmd) {
 		return w.cmdClone(ctx, botConfig.Token, msg, userID, args)
 	}

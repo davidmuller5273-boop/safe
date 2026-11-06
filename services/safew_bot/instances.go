@@ -29,18 +29,19 @@ type botInstance struct {
 	ParentID string
 
 	client *safew.Client
-	token  string // clones only; the mother re-reads systemconfig each time
+	token  string // clones and the Telegram mother; the SafeW mother re-reads systemconfig each time
 	cancel context.CancelFunc
 }
 
 // registry tracks running instances. The mother process owns every poller,
 // including clones of clones.
 type registry struct {
-	mu      sync.RWMutex
-	root    context.Context
-	mother  *botInstance
-	bots    map[string]*botInstance
-	pending map[string]time.Time // botID|userID → waiting for a pasted token
+	mu       sync.RWMutex
+	root     context.Context
+	mother   *botInstance // SafeW 母机器人（原始，Redis 已发送键保持原样）
+	tgMother *botInstance // Telegram 母机器人（可选）
+	bots     map[string]*botInstance
+	pending  map[string]time.Time // botID|userID → waiting for a pasted token
 }
 
 func newRegistry(root context.Context, mother *botInstance) *registry {
@@ -65,6 +66,61 @@ func (r *registry) motherID() string {
 		return ""
 	}
 	return r.mother.ID
+}
+
+// isMotherID is true for the SafeW mother and the Telegram mother.
+func (r *registry) isMotherID(id string) bool {
+	if r == nil || id == "" {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return (r.mother != nil && r.mother.ID == id) || (r.tgMother != nil && r.tgMother.ID == id)
+}
+
+// setTGMother registers (or replaces) the Telegram mother. Returns false when
+// the bot_id is already used by another instance (SafeW mother or a clone).
+func (r *registry) setTGMother(inst *botInstance) bool {
+	r.mu.Lock()
+	old := r.tgMother
+	if cur, ok := r.bots[inst.ID]; ok && cur != old {
+		r.mu.Unlock()
+		return false
+	}
+	if old != nil {
+		delete(r.bots, old.ID)
+	}
+	r.tgMother = inst
+	r.bots[inst.ID] = inst
+	r.mu.Unlock()
+	if old != nil && old.cancel != nil {
+		old.cancel()
+	}
+	return true
+}
+
+// stopTGMother stops the Telegram mother poller.
+func (r *registry) stopTGMother() bool {
+	r.mu.Lock()
+	old := r.tgMother
+	if old != nil {
+		delete(r.bots, old.ID)
+		r.tgMother = nil
+	}
+	r.mu.Unlock()
+	if old != nil && old.cancel != nil {
+		old.cancel()
+	}
+	return old != nil
+}
+
+func (r *registry) tgMotherInst() *botInstance {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.tgMother
 }
 
 // add registers inst; false when that bot_id is already running.
@@ -146,7 +202,7 @@ func (w worker) isMother() bool { return w.inst == nil || w.inst.IsMother }
 
 // loadBotConfig returns this instance's token (clones never read the mother's config).
 func (w worker) loadBotConfig() (systemconfig.SafeW, error) {
-	if w.inst != nil && !w.inst.IsMother {
+	if w.inst != nil && (!w.inst.IsMother || w.inst.token != "") {
 		return systemconfig.SafeW{Token: w.inst.token}, nil
 	}
 	return systemconfig.LoadSafeW(w.db)
@@ -166,7 +222,8 @@ func (w worker) route(botID string) (worker, string, bool) {
 	return iw, cfg.Token, true
 }
 
-// sentKey keeps the mother's Redis "already sent" keys unchanged.
+// sentKey keeps the SafeW mother's Redis "already sent" keys unchanged; the
+// Telegram mother and clones use bot_id-scoped keys.
 func (w worker) sentChatKey(botID, chatID string) string {
 	if botID == w.reg.motherID() {
 		return chatID
@@ -215,7 +272,7 @@ func (w worker) startActiveClones() {
 		return
 	}
 	for _, c := range rows {
-		if c.BotID == w.reg.motherID() {
+		if w.reg.isMotherID(c.BotID) {
 			continue
 		}
 		token, err := w.clones.Token(c)

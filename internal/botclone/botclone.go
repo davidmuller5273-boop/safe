@@ -237,6 +237,7 @@ type Saver interface {
 type Request struct {
 	ParentBotID     string
 	MotherBotID     string
+	IsMotherID      func(botID string) bool // any mother (SafeW / Telegram)
 	APIBase         string
 	Token           string
 	RequestedBy     string
@@ -266,7 +267,7 @@ func Register(ctx context.Context, store Saver, getMe GetMeFunc, req Request) (C
 	if err != nil || strings.TrimSpace(me.ID) == "" {
 		return Clone{}, ErrBadToken
 	}
-	if req.MotherBotID != "" && me.ID == req.MotherBotID {
+	if (req.MotherBotID != "" && me.ID == req.MotherBotID) || (req.IsMotherID != nil && req.IsMotherID(me.ID)) {
 		return Clone{}, ErrIsMother
 	}
 	if req.IsReserved != nil && req.IsReserved(me.ID) {

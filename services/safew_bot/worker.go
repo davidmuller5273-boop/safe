@@ -93,6 +93,7 @@ func Run() error {
 	worker := base.forInstance(mother)
 	log.Printf("SafeW 机器人消息服务已启动 (developers=%d, 母机器人 bot_id=%s)", len(cfg.DeveloperUserIDs), mother.ID)
 	worker.startActiveClones()
+	go worker.bootTGMother(ctx)
 
 	const workers = 7
 	errCh := make(chan error, workers)

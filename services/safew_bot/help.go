@@ -53,7 +53,8 @@ const (
 /关闭亚军7码 — 关闭亚军7码`
 
 	helpClone = `【克隆机器人】
-/克隆 — 私聊发送，按提示把 @BotFather 的 Token 发给我，立即得到一个属于你的机器人（管理员全部功能，群数据独立）`
+/克隆 — 私聊发送，按提示把 @BotFather 的 Token 发给我，立即得到一个属于你的机器人（管理员全部功能，群数据独立）
+母机器人可同时有 SafeW 和 Telegram 两个，都拥有全部权限；克隆出来的仍是管理员权限`
 
 	helpGroupAdmins = `【群管理员】
 /addgroupadmin 用户ID [群ID] — 添加群管理员

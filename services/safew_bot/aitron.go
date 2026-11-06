@@ -118,7 +118,7 @@ func (s aiTronSender) Send(ctx context.Context, chatKey, body string) error {
 		return fmt.Errorf("机器人 %s 未在运行", botID)
 	}
 	token := inst.token
-	if inst.IsMother {
+	if inst.IsMother && inst.token == "" {
 		botConfig, err := systemconfig.LoadSafeW(s.db)
 		if err != nil {
 			return fmt.Errorf("等待 SafeW 配置: %w", err)

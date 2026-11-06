@@ -64,7 +64,7 @@ func actionLevel(action string) permLevel {
 		return levelAnyone
 	case action == "gs" || strings.HasPrefix(action, "gs:"):
 		return levelSuper
-	case action == "ex" || action == "kll" ||
+	case action == "ex" || action == "kll" || action == "tgs" || action == "tgo" ||
 		strings.HasPrefix(action, "klo:") || strings.HasPrefix(action, "kln:") || strings.HasPrefix(action, "kld:"):
 		return levelDeveloper
 	case action == "kl":
@@ -462,6 +462,13 @@ func (w worker) privateHomeMarkup(tier, userID, role string) *safew.InlineKeyboa
 		}
 		kb.InlineKeyboard = append(kb.InlineKeyboard, row)
 	}
+	if w.canManageTGMother(userID) {
+		if w.reg.tgMotherInst() != nil {
+			kb.InlineKeyboard = append(kb.InlineKeyboard, []safew.InlineKeyboardButton{btn(tier, "⛔ 关闭TG母机器人", "tgo")})
+		} else {
+			kb.InlineKeyboard = append(kb.InlineKeyboard, []safew.InlineKeyboardButton{btn(tier, "✈️ 设置TG母机器人", "tgs")})
+		}
+	}
 	return kb
 }
 
@@ -648,6 +655,10 @@ func (w worker) runPanelAction(ctx context.Context, token string, msgChat safew.
 	}
 	opIsGroup := targetChat != "" || isGroupChat(msgChat)
 
+	if action == "tgs" || action == "tgo" {
+		toast, alert, err := w.tgMotherPanelAction(ctx, token, msgChat, userID, action)
+		return toast, alert, viewNone, err
+	}
 	if strings.HasPrefix(action, "kl") {
 		toast, alert, err := w.clonePanelAction(ctx, token, msgChat, messageID, userID, action)
 		return toast, alert, viewNone, err

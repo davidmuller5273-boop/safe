@@ -126,6 +126,7 @@ func (w worker) registerClone(ctx context.Context, cloneToken, userID, username 
 	c, err := botclone.Register(ctx, w.clones, getMe, botclone.Request{
 		ParentBotID:     w.botID(),
 		MotherBotID:     w.reg.motherID(),
+		IsMotherID:      w.reg.isMotherID,
 		APIBase:         cloneAPIBase(),
 		Token:           cloneToken,
 		RequestedBy:     userID,
@@ -222,7 +223,7 @@ func (w worker) setCloneState(ctx context.Context, botID, op string) (string, er
 	if botID == "" {
 		return "", userError{errors.New("请提供克隆机器人 ID（见 /克隆列表）")}
 	}
-	if botID == w.reg.motherID() {
+	if w.reg.isMotherID(botID) {
 		return "", userError{errors.New("不能操作母机器人")}
 	}
 	c, found, err := w.clones.Get(botID)
